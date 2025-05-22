@@ -90,16 +90,16 @@ graph TD
 
 **Key Modules & Classes:**
 
-*   **`src/main.py`**:
+*   **[`src/main.py`](src/main.py)**:
     *   `run_app()`: Entry point of the application. Initializes logging, `QApplication`, `MainWindow`, and starts the event loop.
-*   **`src/main_window.py` (`MainWindow` class):**
+*   **[`src/main_window.py`](src/main_window.py) (`MainWindow` class):**
     *   Main application window, inherits `QMainWindow`.
     *   Orchestrates UI components (`KnowledgeTreeWidget`, `TopicEditorWidget`) using a `QSplitter`.
     *   Sets up menus, toolbars, and connects signals from widgets to handler methods.
     *   Handles core application logic like text extraction (`extract_text()`), saving content (`save_current_topic_content()`), and responding to topic selection/title changes.
     *   Calls `data_manager.initialize_database()` on startup.
     *   Includes `_create_test_data_if_needed()` for consistent debugging of highlighting.
-*   **`src/data_manager.py`**:
+*   **[`src/data_manager.py`](src/data_manager.py)**:
     *   Handles all interactions with the SQLite database and topic text files.
     *   `initialize_database()`: Creates directories and applies database migrations.
     *   `_apply_migrations()`: Applies SQL scripts from the `migrations/` directory.
@@ -111,7 +111,7 @@ graph TD
     *   `create_extraction()`: Records an extraction event (links parent to new child topic, stores character offsets).
     *   `get_extractions_for_parent()`: Retrieves extraction records for highlighting.
     *   `_generate_initial_title()`: Helper to create default topic titles.
-*   **`src/knowledge_tree_widget.py` (`KnowledgeTreeWidget` class):**
+*   **[`src/knowledge_tree_widget.py`](src/knowledge_tree_widget.py) (`KnowledgeTreeWidget` class):**
     *   Custom widget inheriting `QTreeView`.
     *   Displays the topic hierarchy using `QStandardItemModel`.
     *   Loads data via `data_manager.get_topic_hierarchy()`.
@@ -120,7 +120,7 @@ graph TD
         *   `topic_selected(topic_id: str)`
         *   `topic_title_changed(topic_id: str, new_title: str)`
     *   Provides methods `add_topic_item()` and `update_topic_item_title()` for programmatic tree updates.
-*   **`src/topic_editor_widget.py` (`TopicEditorWidget` class):**
+*   **[`src/topic_editor_widget.py`](src/topic_editor_widget.py) (`TopicEditorWidget` class):**
     *   Custom widget inheriting `QTextEdit`.
     *   Displays and allows editing of the selected topic's content.
     *   `load_topic_content()`: Fetches and displays topic text, then applies existing highlights.
@@ -128,7 +128,7 @@ graph TD
     *   `apply_extraction_highlight()`: Applies background color to a specified text range.
     *   `get_current_content()`: Returns current text.
     *   `get_selected_text_and_offsets()`: Returns selected text and its start/end character positions.
-*   **`src/logger_config.py`**:
+*   **[`src/logger_config.py`](src/logger_config.py)**:
     *   `setup_logging()`: Configures application-wide logging (file and console).
     *   `APP_NAME`: Constant for the logger name.
 
@@ -154,3 +154,144 @@ graph TD
 *   Refined ribbon UI.
 *   Comprehensive unit and integration testing.
 *   Packaging for Windows, Linux, macOS.
+
+## 7. Architectural Design: Collections Feature
+
+This document outlines the architectural changes required to implement the "Collections" feature in the Iromo application.
+
+### 1. File System Structure for Collections
+
+**1.1. Collection Location:**
+*   Users will be able to **save and open Iromo collection folders from any location** on their file system. This provides maximum flexibility, similar to how standard document-based applications (e.g., word processors, IDEs) handle project or document files.
+*   The application may offer a default suggested location (e.g., in the user's "Documents" folder under an "Iromo Collections" subdirectory) when creating a new collection, but the user will have the final say.
+
+**1.2. Internal Structure of a Collection Folder:**
+Each Iromo collection will be a self-contained folder. The internal structure of a collection folder (e.g., `MyVacationNotes/`) will be:
+
+```
+MyVacationNotes/
+├── iromo.sqlite              # The SQLite database for this specific collection
+├── text_files/               # Directory containing all topic text files for this collection
+│   ├── uuid1.txt
+│   ├── uuid2.txt
+│   └── ...
+└── iromo_collection.json     # (Recommended) A manifest file (see section 5)
+```
+
+This structure mirrors the current `iromo_data/` layout but encapsulates it within each user-defined collection folder.
+
+### 2. Module Impact Analysis
+
+The introduction of collections will primarily impact modules responsible for data management and UI orchestration.
+
+**2.1. [`src/data_manager.py`](src/data_manager.py)**
+
+*   **Nature of Change:** This module will be refactored from a collection of functions operating on global, hardcoded paths to a **`DataManager` class**.
+*   **Instantiation:** An instance of `DataManager` will be created for each active collection. The constructor will accept the base path of the collection folder as an argument (e.g., `collection_base_path`).
+    ```python
+    # Example:
+    # class DataManager:
+    #     def __init__(self, collection_base_path):
+    #         self.collection_base_path = collection_base_path
+    #         self.db_path = os.path.join(collection_base_path, "iromo.sqlite")
+    #         self.text_files_dir = os.path.join(collection_base_path, "text_files")
+    #         self.migrations_dir = "migrations" # This can remain relative to app install or be configurable
+    #         # ...
+    ```
+*   **Path Handling:** All internal functions that currently use global constants like `DB_NAME` and `TEXT_FILES_DIR` (e.g., `get_db_connection()`, `create_topic()`, `_get_topic_text_file_path()`) will be modified to derive paths from the instance's `self.db_path` and `self.text_files_dir`.
+*   **`initialize_database()`:** This method (or an equivalent instance method) will operate on the specific collection's `db_path` and `text_files_dir`. It will be responsible for creating these if they don't exist (e.g., for a new collection) and applying migrations to the collection's database. The `MIGRATIONS_DIR` path itself would likely remain relative to the application's installation directory, as migration scripts are part of the application code, not individual collections.
+
+**2.2. [`src/main_window.py`](src/main_window.py) (`MainWindow` class)**
+
+*   **DataManager Instance:** `MainWindow` will hold an instance of the `DataManager` class for the currently active collection (e.g., `self.active_collection_dm = DataManager(path_to_collection)`). This will be `None` if no collection is open.
+*   **Data Operations:** All direct calls to `dm.some_function()` will be changed to `self.active_collection_dm.some_function()`. Logic must be added to handle cases where `self.active_collection_dm` is `None`.
+*   **Initialization:** The current call to `dm.initialize_database()` in `MainWindow.__init__` will be removed. Database/collection initialization will occur when a user creates a new collection or opens an existing one.
+*   **UI for Collection Management:**
+    *   The "File" menu (`_create_menu_bar()`) will be extended with new `QAction`s:
+        *   "New Collection..." (prompts for folder name/location, then creates structure and initializes `DataManager`).
+        *   "Open Collection..." (shows a directory dialog, validates selection, then initializes `DataManager`).
+        *   "Close Collection" (clears current `DataManager`, resets UI).
+        *   "Recent Collections" (submenu to quickly reopen collections).
+    *   The main window title should be updated to reflect the name or path of the currently active collection (e.g., "Iromo - MyVacationNotes").
+*   **Widget State Management:**
+    *   When a collection is opened, `MainWindow` will load data into `KnowledgeTreeWidget` and potentially `TopicEditorWidget` using the `self.active_collection_dm`.
+    *   When a collection is closed, or if no collection is open, `MainWindow` will instruct these widgets to clear their views and potentially disable certain functionalities.
+*   **Test Data:** The `_create_test_data_if_needed()` method will need to be re-evaluated. Test data might be part of a sample collection, or this logic might be removed/changed for production.
+
+**2.3. [`src/main.py`](src/main.py) (`run_app()` function)**
+
+*   **Startup Behavior:** The application will start without an active collection by default, unless it can load the path of the last-used collection from a preference file (see Section 3).
+*   `MainWindow` will be instantiated, but it will initially be in a "no collection open" state (see Section 4). It will not immediately try to load data as it does now.
+
+**2.4. [`src/knowledge_tree_widget.py`](src/knowledge_tree_widget.py) (`KnowledgeTreeWidget` class)**
+
+*   **Data Loading:** Will need a method like `load_from_datamanager(dm_instance)` or `set_datamanager(dm_instance)` to populate the tree. It will call `dm_instance.get_topic_hierarchy()`.
+*   **Clearing View:** Will need a `clear_tree()` method to empty its contents when a collection is closed or on startup if no collection is loaded.
+*   **State Management:** UI elements might be disabled if no collection is active.
+
+**2.5. [`src/topic_editor_widget.py`](src/topic_editor_widget.py) (`TopicEditorWidget` class)**
+
+*   **Data Loading:** `load_topic_content(topic_id)` will need access to the active `DataManager` instance (likely passed from `MainWindow` or the `DataManager` instance itself is passed).
+*   **Clearing View:** Will need a `clear_content()` method to empty the editor and reset its state.
+*   **State Management:** The editor should be disabled or show placeholder text if no topic (or no collection) is active.
+
+### 3. Active Collection Management
+
+**3.1. Tracking the Active Collection Path:**
+*   **In Memory:** `MainWindow` will store the file system path to the root of the currently active collection (e.g., `self.active_collection_path`). This path will be used to instantiate the `DataManager` for that collection.
+*   **Persistence (Last Opened Collection):** To improve user experience, the path of the last successfully opened collection will be stored in a simple application configuration file.
+    *   **Location:** This file could reside in a standard user-specific application data directory (e.g., `~/.config/Iromo/settings.json` on Linux, or platform-appropriate locations using `QSettings` from Qt).
+    *   **Content:** A simple JSON structure like: `{"last_opened_collection": "/path/to/user/collection_folder"}`.
+    *   On startup, the application will attempt to read this path and reopen the collection. If it fails (e.g., folder moved/deleted), it will start in the "no collection open" state.
+
+**3.2. Passing to Modules:**
+*   When a collection is opened or created, `MainWindow` will instantiate `DataManager(active_collection_path)`.
+*   This `DataManager` instance (`self.active_collection_dm`) will then be used by `MainWindow` for its own data operations.
+*   When `KnowledgeTreeWidget` or `TopicEditorWidget` need to perform data operations (e.g., load hierarchy, load topic content), they will either:
+    1.  Be explicitly passed the `self.active_collection_dm` instance by `MainWindow` when calling their methods.
+    2.  Have a reference to the `self.active_collection_dm` set by `MainWindow` when the collection becomes active.
+
+### 4. "No Collection Open" State
+
+This state occurs on the first launch after the feature is implemented, if the user explicitly closes a collection, or if the last-opened collection cannot be found.
+
+**4.1. Application Behavior:**
+*   Most data-dependent functionalities will be disabled (e.g., extract text, save content, new topic within a collection).
+*   The primary available actions will be to create a new collection or open an existing one.
+
+**4.2. UI Presentation:**
+*   **`MainWindow` Title:** Could display "Iromo - No Collection Open".
+*   **`KnowledgeTreeWidget`:** Will be empty. A placeholder message like "No collection open. Use File > New Collection or File > Open Collection." could be displayed.
+*   **`TopicEditorWidget`:** Will be empty and likely read-only or disabled. A similar placeholder message could be shown.
+*   **Menu Bar:**
+    *   "File" menu: "New Collection...", "Open Collection...", "Recent Collections" (if any), and "Exit" will be enabled. Other actions like "Save Content" will be disabled.
+    *   Other menus (Edit, View, etc.) might have most of their items disabled.
+*   **Toolbar:** Actions on the toolbar will be disabled.
+
+### 5. Collection File Extension / Manifest (Recommended)
+
+Using a manifest file within each collection folder is **recommended** for better identification and future-proofing.
+
+**5.1. Proposal: Manifest File (`iromo_collection.json`)**
+
+*   **File:** A JSON file named `iromo_collection.json` (or similar, e.g., `.iromo_manifest`) will reside in the root of each collection folder.
+*   **Purpose:**
+    *   Allows the application to reliably identify a folder as an Iromo collection during the "Open Collection..." process.
+    *   Can store metadata about the collection.
+*   **Content (MVP):** For the initial implementation, it can be very simple:
+    ```json
+    {
+      "type": "iromo_collection",
+      "version": "1.0", // Iromo version that created/understands this collection format
+      "created_at": "YYYY-MM-DDTHH:MM:SSZ", // Optional: timestamp of creation
+      "collection_name": "My User-Friendly Collection Name" // Optional: if different from folder name
+    }
+    ```
+    Even an empty file or just `{"type": "iromo_collection"}` would suffice initially for identification.
+*   **Benefits:**
+    *   Makes the "Open Collection" dialog potentially filterable if the OS supports filtering by contained files (though direct folder selection is primary).
+    *   Provides a clear indicator to users that a folder is an Iromo collection.
+    *   Allows for future expansion with more metadata without changing core file structures (e.g., collection-specific settings, last modified date by Iromo).
+
+**5.2. Alternative (Not Recommended for MVP): Bundled Package**
+A single file with a custom extension (e.g., `.iromocoll`) that is internally a package (like a ZIP archive or macOS .app bundle) could be considered for a more "document-like" feel. However, this adds significant implementation complexity for managing the archive and is not recommended for the MVP. The folder-based approach with a manifest is simpler and more transparent.

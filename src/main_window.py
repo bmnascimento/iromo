@@ -1,291 +1,354 @@
 import sys
+import os
+import json
+import logging
 from PyQt6.QtWidgets import (QMainWindow, QApplication, QToolBar, QLabel,
-                             QSplitter, QVBoxLayout, QWidget)
+                             QSplitter, QVBoxLayout, QWidget, QFileDialog, QMessageBox)
 from PyQt6.QtGui import QAction
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QSettings
 
 from .knowledge_tree_widget import KnowledgeTreeWidget
 from .topic_editor_widget import TopicEditorWidget
-from . import data_manager as dm # For initializing the database
-import logging
+from .data_manager import DataManager, DB_FILENAME, TEXT_FILES_SUBDIR # Import DataManager class
 
 logger = logging.getLogger(__name__)
+APP_ORGANIZATION_NAME = "IromoOrg" # For QSettings
+APP_NAME = "Iromo" # For QSettings
+COLLECTION_MANIFEST_FILE = "iromo_collection.json"
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("Iromo - Incremental Reading")
-        self.setGeometry(100, 100, 1024, 768)  # x, y, width, height
+        self.data_manager = None
+        self.active_collection_path = None
 
-        # Initialize database if it's the first run
-        dm.initialize_database() # Ensures DB and tables exist
-        self._create_test_data_if_needed() # For debugging highlights
+        self.setWindowTitle(f"{APP_NAME} - No Collection Open")
+        self.setGeometry(100, 100, 1024, 768)
 
         self._create_menu_bar()
-        self._create_tool_bar() # Placeholder for the ribbon
+        self._create_tool_bar()
         self._setup_central_widget()
         self._connect_signals()
+        
+        self._update_ui_for_collection_state() # Initial UI state
+        self._try_load_last_collection()
 
     def _create_menu_bar(self):
         menu_bar = self.menuBar()
-
-        # File Menu
         file_menu = menu_bar.addMenu("&File")
 
-        new_action = QAction("&New Topic", self)
-        # new_action.triggered.connect(self.new_topic) # Placeholder
-        file_menu.addAction(new_action)
+        new_collection_action = QAction("&New Collection...", self)
+        new_collection_action.triggered.connect(self._handle_new_collection)
+        file_menu.addAction(new_collection_action)
 
+        open_collection_action = QAction("&Open Collection...", self)
+        open_collection_action.triggered.connect(self._handle_open_collection)
+        file_menu.addAction(open_collection_action)
+
+        self.close_collection_action = QAction("&Close Collection", self)
+        self.close_collection_action.triggered.connect(self._handle_close_collection)
+        file_menu.addAction(self.close_collection_action)
+        
+        file_menu.addSeparator()
+
+        self.new_topic_action = QAction("&New Topic", self)
+        # self.new_topic_action.triggered.connect(self.new_topic_handler) # Placeholder
+        file_menu.addAction(self.new_topic_action)
+
+        self.save_content_action = QAction("&Save Content", self)
+        self.save_content_action.triggered.connect(self.save_current_topic_content)
+        file_menu.addAction(self.save_content_action)
+        
+        file_menu.addSeparator()
         exit_action = QAction("&Exit", self)
-        exit_action.triggered.connect(self.close)
+        exit_action.triggered.connect(self.close) # QMainWindow.close
         file_menu.addAction(exit_action)
 
-        save_action = QAction("&Save Content", self)
-        save_action.triggered.connect(self.save_current_topic_content)
-        # save_action.setShortcut("Ctrl+S") # Add shortcut later if desired
-        file_menu.addAction(save_action)
-
-        # Edit Menu (Placeholder)
         edit_menu = menu_bar.addMenu("&Edit")
-        # Add edit actions here later
-
-        # View Menu (Placeholder)
         view_menu = menu_bar.addMenu("&View")
-        # Add view actions here later
-
-        # Help Menu
         help_menu = menu_bar.addMenu("&Help")
         about_action = QAction("&About", self)
-        # about_action.triggered.connect(self.show_about_dialog) # Placeholder
         help_menu.addAction(about_action)
 
     def _create_tool_bar(self):
-        # This will eventually be replaced by a more complex ribbon UI
         toolbar = QToolBar("Main Toolbar")
         self.addToolBar(toolbar)
 
-        # Example action
-        extract_action = QAction("Extract (Alt+X)", self)
-        extract_action.triggered.connect(self.extract_text)
-        extract_action.setShortcut("Alt+X")
-        self.addAction(extract_action) # Add shortcut to window context
-        toolbar.addAction(extract_action)
+        self.extract_action_toolbar = QAction("Extract (Alt+X)", self)
+        self.extract_action_toolbar.triggered.connect(self.extract_text)
+        self.extract_action_toolbar.setShortcut("Alt+X")
+        self.addAction(self.extract_action_toolbar) # Add shortcut to window context
+        toolbar.addAction(self.extract_action_toolbar)
 
-        save_content_action_toolbar = QAction("Save Content", self)
-        save_content_action_toolbar.triggered.connect(self.save_current_topic_content)
-        toolbar.addAction(save_content_action_toolbar)
-
+        self.save_content_action_toolbar = QAction("Save Content", self)
+        self.save_content_action_toolbar.triggered.connect(self.save_current_topic_content)
+        toolbar.addAction(self.save_content_action_toolbar)
 
     def _setup_central_widget(self):
-        # Main content area will be a splitter
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
-
-        # Knowledge Tree Widget
-        self.tree_widget = KnowledgeTreeWidget()
-        
-        # Topic Editor Widget
-        self.editor_widget = TopicEditorWidget()
+        self.tree_widget = KnowledgeTreeWidget() # Will need update for DM
+        self.editor_widget = TopicEditorWidget() # Will need update for DM
         
         self.splitter.addWidget(self.tree_widget)
         self.splitter.addWidget(self.editor_widget)
-        
-        # Set initial sizes for the splitter panes (e.g., 1/3 for tree, 2/3 for editor)
         self.splitter.setSizes([self.width() // 3, 2 * self.width() // 3])
-
         self.setCentralWidget(self.splitter)
 
     def _connect_signals(self):
         self.tree_widget.topic_selected.connect(self.handle_topic_selected)
         self.tree_widget.topic_title_changed.connect(self.handle_topic_title_changed)
 
+    def _update_ui_for_collection_state(self):
+        collection_open = self.data_manager is not None
+        
+        self.close_collection_action.setEnabled(collection_open)
+        self.new_topic_action.setEnabled(collection_open)
+        self.save_content_action.setEnabled(collection_open)
+        self.save_content_action_toolbar.setEnabled(collection_open)
+        self.extract_action_toolbar.setEnabled(collection_open)
+
+        if collection_open and self.active_collection_path:
+            collection_name = os.path.basename(self.active_collection_path)
+            self.setWindowTitle(f"{APP_NAME} - {collection_name}")
+        else:
+            self.setWindowTitle(f"{APP_NAME} - No Collection Open")
+            self.tree_widget.clear_tree() # Assumes method exists
+            self.editor_widget.clear_content() # Assumes method exists
+            
+    def _save_last_collection_path(self, path):
+        settings = QSettings(APP_ORGANIZATION_NAME, APP_NAME)
+        if path:
+            settings.setValue("last_opened_collection", path)
+        else:
+            settings.remove("last_opened_collection")
+
+    def _try_load_last_collection(self):
+        settings = QSettings(APP_ORGANIZATION_NAME, APP_NAME)
+        last_path = settings.value("last_opened_collection")
+        if last_path and os.path.isdir(last_path):
+            logger.info(f"Attempting to load last opened collection: {last_path}")
+            self._open_collection(last_path)
+        else:
+            logger.info("No last opened collection path found or path is invalid.")
+
+    def _handle_new_collection(self):
+        dir_path = QFileDialog.getSaveFileName(
+            self, 
+            "Create New Collection Folder", 
+            os.path.expanduser("~"), # Start in home directory
+            "Folders" # This is a bit of a hack for QFileDialog to act like a folder creator
+                      # A better way might be to get a directory and then append a new folder name.
+                      # For now, user selects/creates a folder.
+        )[0] # getSaveFileName returns a tuple (filePath, selectedFilter)
+
+        if not dir_path:
+            return # User cancelled
+
+        # Ensure the directory exists, QFileDialog for saving might not create it.
+        if not os.path.exists(dir_path):
+            try:
+                os.makedirs(dir_path)
+            except OSError as e:
+                QMessageBox.critical(self, "Error", f"Could not create directory: {dir_path}\n{e}")
+                return
+        elif not os.path.isdir(dir_path):
+             QMessageBox.critical(self, "Error", f"Selected path is not a directory: {dir_path}")
+             return
+
+        # Check if it's already a collection or contains conflicting files
+        manifest_path = os.path.join(dir_path, COLLECTION_MANIFEST_FILE)
+        db_path = os.path.join(dir_path, DB_FILENAME)
+        text_dir_path = os.path.join(dir_path, TEXT_FILES_SUBDIR)
+
+        if os.path.exists(manifest_path) or os.path.exists(db_path) or os.path.exists(text_dir_path):
+            reply = QMessageBox.question(self, "Warning",
+                                         "The selected directory is not empty or might already be an Iromo collection. "
+                                         "Do you want to try to initialize it as a new collection anyway? "
+                                         "(Existing Iromo data might be overwritten or lead to errors)",
+                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if reply == QMessageBox.StandardButton.No:
+                return
+        
+        # Create manifest file
+        try:
+            with open(manifest_path, 'w') as f:
+                json.dump({
+                    "type": "iromo_collection",
+                    "version": "1.0",
+                    "created_at": QSettings().value("app_version", "unknown") # Placeholder for app version
+                }, f, indent=2)
+        except IOError as e:
+            QMessageBox.critical(self, "Error", f"Could not create manifest file: {manifest_path}\n{e}")
+            return
+
+        self._open_collection(dir_path, is_new=True)
+
+
+    def _handle_open_collection(self):
+        dir_path = QFileDialog.getExistingDirectory(self, "Open Iromo Collection", os.path.expanduser("~"))
+        if dir_path:
+            self._open_collection(dir_path)
+
+    def _open_collection(self, collection_path, is_new=False):
+        manifest_path = os.path.join(collection_path, COLLECTION_MANIFEST_FILE)
+        
+        if not is_new and not os.path.exists(manifest_path):
+            QMessageBox.warning(self, "Not an Iromo Collection",
+                                f"The selected folder '{collection_path}' does not appear to be a valid Iromo collection (missing '{COLLECTION_MANIFEST_FILE}').")
+            return
+
+        if self.data_manager: # Close existing collection first
+            self._handle_close_collection()
+
+        try:
+            self.data_manager = DataManager(collection_path)
+            self.data_manager.initialize_collection_storage() # Creates DB, text_files dir, applies migrations
+            self.active_collection_path = collection_path
+            
+            # Load data into UI
+            self.tree_widget.load_tree_data(self.data_manager) # Assumes method exists
+            self.editor_widget.clear_content() # Clear editor for new collection
+
+            self._save_last_collection_path(collection_path)
+            logger.info(f"Successfully opened collection: {collection_path}")
+        except Exception as e:
+            logger.error(f"Failed to open or initialize collection at {collection_path}: {e}")
+            QMessageBox.critical(self, "Error Opening Collection", f"Could not open or initialize collection: {collection_path}\n{e}")
+            self.data_manager = None
+            self.active_collection_path = None
+        
+        self._update_ui_for_collection_state()
+
+    def _handle_close_collection(self):
+        if not self.data_manager:
+            return
+
+        # Potentially prompt to save unsaved changes if any
+        logger.info(f"Closing collection: {self.active_collection_path}")
+        self.data_manager = None
+        self.active_collection_path = None
+        self._save_last_collection_path(None) # Clear last opened path
+        self._update_ui_for_collection_state()
+
+
     # --- Signal Handlers ---
     def handle_topic_selected(self, topic_id):
+        if not self.data_manager:
+            logger.warning("handle_topic_selected called but no collection is open.")
+            return
+
         logger.info(f"Topic selected - ID: {topic_id}")
-        # Before loading new content, check if current editor content needs saving
-        # For now, we'll just load. A "dirty" flag mechanism would be better.
         if self.editor_widget.current_topic_id and self.editor_widget.current_topic_id != topic_id:
-            # Potentially prompt to save changes for self.editor_widget.current_topic_id
-            # For MVP, we can save automatically or just switch. Let's save current before switching.
             logger.info(f"Saving content for {self.editor_widget.current_topic_id} before switching to {topic_id}.")
             self.save_current_topic_content(prompt_if_no_topic=False)
-
-
-        self.editor_widget.load_topic_content(topic_id)
+        
+        # Pass data_manager to load_topic_content
+        self.editor_widget.load_topic_content(topic_id, self.data_manager) # Assumes method signature updated
 
     def handle_topic_title_changed(self, topic_id, new_title):
+        if not self.data_manager:
+            logger.warning("handle_topic_title_changed called but no collection is open.")
+            return
+
         logger.info(f"Topic title changed - ID: {topic_id}, New Title: '{new_title}'")
-        # Persist the change to the database
-        success = dm.update_topic_title(topic_id, new_title)
+        success = self.data_manager.update_topic_title(topic_id, new_title)
         if not success:
             logger.error(f"Error persisting title change for {topic_id} to '{new_title}'")
-            # Optionally, revert the title in the tree or show an error to the user
-            # For now, we'll assume the tree widget's display is the source of truth until AppLogic handles this
-            # self.tree_widget.update_topic_item_title(topic_id, dm.get_topic_title(topic_id)) # Needs get_topic_title
-    
+            # Optionally, show an error to the user or revert in tree
+            
     def save_current_topic_content(self, prompt_if_no_topic=True):
-        """Saves the content of the currently active topic in the editor."""
+        if not self.data_manager:
+            if prompt_if_no_topic:
+                logger.info("No collection open. Cannot save content.")
+                QMessageBox.information(self, "Save Content", "No collection is open to save content to.")
+            return
+
         current_editor_topic_id = self.editor_widget.current_topic_id
         if current_editor_topic_id:
             content = self.editor_widget.get_current_content()
-            success = dm.save_topic_content(current_editor_topic_id, content)
+            success = self.data_manager.save_topic_content(current_editor_topic_id, content)
             if success:
                 logger.info(f"Content for topic {current_editor_topic_id} saved successfully.")
-                # Refresh highlights in case new extractions were made and saved with content
-                # self.editor_widget._apply_existing_highlights() # Or do this on next load
             else:
                 logger.error(f"Failed to save content for topic {current_editor_topic_id}.")
-                # Optionally, show an error message to the user
+                QMessageBox.warning(self, "Save Error", f"Could not save content for topic {current_editor_topic_id}.")
         elif prompt_if_no_topic:
             logger.info("No topic loaded in the editor to save.")
-            # Optionally, show a message to the user (e.g., in status bar)
-
-
-    # --- Placeholder Action Handlers from Menu/Toolbar ---
-    # def new_topic(self): pass
-    # def show_about_dialog(self): pass
-    
+            QMessageBox.information(self, "Save Content", "No topic is currently loaded in the editor.")
+            
     def extract_text(self):
-        """Handles the text extraction action."""
+        if not self.data_manager:
+            logger.warning("Extract text called but no collection is open.")
+            QMessageBox.information(self, "Extract Text", "No collection is open to extract text into.")
+            return
+
         current_parent_topic_id = self.editor_widget.current_topic_id
         if not current_parent_topic_id:
             logger.warning("No parent topic selected/loaded in editor to extract from.")
-            # Optionally: show a status message to the user
+            QMessageBox.information(self, "Extract Text", "Please select a topic to extract from.")
             return
 
         selected_text, start_char, end_char = self.editor_widget.get_selected_text_and_offsets()
-
         if not selected_text:
             logger.info("No text selected to extract.")
-            # Optionally: show a status message to the user
+            QMessageBox.information(self, "Extract Text", "Please select text to extract.")
             return
 
         logger.info(f"Attempting to extract: '{selected_text}' from parent {current_parent_topic_id} (chars {start_char}-{end_char})")
+        self.save_current_topic_content(prompt_if_no_topic=False)
 
-        # 1. Save current parent topic content FIRST, as offsets depend on current state
-        #    If content hasn't changed, this is quick. If it has, it ensures consistency.
-        self.save_current_topic_content(prompt_if_no_topic=False) # Don't prompt if no topic, already checked
-
-        # 2. Create the new child topic with the extracted text
-        #    The title will be auto-generated by create_topic from selected_text
-        child_topic_id = dm.create_topic(text_content=selected_text, parent_id=current_parent_topic_id)
-
+        child_topic_id = self.data_manager.create_topic(text_content=selected_text, parent_id=current_parent_topic_id)
         if not child_topic_id:
             logger.error("Failed to create child topic for extraction.")
-            # Optionally: show an error message
+            QMessageBox.critical(self, "Extraction Error", "Could not create the new topic for extraction.")
             return
         
-        child_topic_title = dm._generate_initial_title(selected_text) # Get the title it would have generated
+        # Use _generate_initial_title from the data_manager instance
+        child_topic_title = self.data_manager._generate_initial_title(selected_text) 
 
-        # 3. Record the extraction
-        extraction_id = dm.create_extraction(
+        extraction_id = self.data_manager.create_extraction(
             parent_topic_id=current_parent_topic_id,
             child_topic_id=child_topic_id,
             start_char=start_char,
             end_char=end_char
         )
-
         if not extraction_id:
             logger.error("Failed to record extraction in database.")
-            # Potentially: delete the orphaned child_topic_id if critical
-            # dm.delete_topic(child_topic_id) # Would need delete_topic
-            # Optionally: show an error message
+            QMessageBox.critical(self, "Extraction Error", "Could not record the extraction link in the database.")
+            # Consider deleting the orphaned child_topic_id here
             return
 
-        # 4. Refresh the KnowledgeTreeWidget to show the new child topic
-        self.tree_widget.add_topic_item(title=child_topic_title, topic_id=child_topic_id, parent_id=current_parent_topic_id)
-        
-        # 5. Re-apply highlighting in the TopicEditorWidget for the parent topic
-        #    This will pick up the new extraction along with any old ones.
-        #    Alternatively, just highlight the new one:
-        #    self.editor_widget.apply_extraction_highlight(start_char, end_char)
-        #    But reloading all ensures consistency if other changes occurred.
-        self.editor_widget._apply_existing_highlights() # Reloads all for current topic
+        self.tree_widget.add_topic_item(title=child_topic_title, topic_id=child_topic_id, parent_id=current_parent_topic_id) # Assumes method exists
+        self.editor_widget._apply_existing_highlights(self.data_manager) # Assumes method signature updated
 
         logger.info(f"Extraction successful: New topic '{child_topic_id}' created and linked.")
-        # Optionally: select the new child topic in the tree and editor
-        # self.tree_widget.setCurrentIndex(self.tree_widget._topic_item_map[child_topic_id].index())
-        # self.handle_topic_selected(child_topic_id)
 
-
-    def _create_test_data_if_needed(self):
-        """Creates a specific topic and extraction for testing if it doesn't exist."""
-        # Check if our specific test parent topic exists by title
-        # This is a simplification; a more robust check might use a known ID or a flag.
-        hierarchy = dm.get_topic_hierarchy()
-        test_parent_title = "Test Parent For Highlight"
-        test_parent_id = None
-        test_child_id = None # To store the ID of the extracted child
-
-        # First, find if the parent topic exists
-        for topic in hierarchy:
-            if topic['title'] == test_parent_title:
-                test_parent_id = topic['id']
-                break # Found parent
-
-        # If parent exists, check if the specific extraction (child) also exists
-        if test_parent_id:
-            for topic in hierarchy: # Iterate again to find child by parent_id and title
-                if topic['parent_id'] == test_parent_id and topic['title'] == "Extracted Part":
-                    test_child_id = topic['id']
-                    # Now also check if an extraction record links them
-                    extractions = dm.get_extractions_for_parent(test_parent_id)
-                    for extr in extractions:
-                        if extr['child_topic_id'] == test_child_id:
-                            logger.info(f"Test data '{test_parent_title}' and its extraction record already exist.")
-                            # Optionally, print FileUUID for debugging
-                            # topic_details = dm.get_topic_details(test_parent_id) # Would need this function
-                            # if topic_details: logger.debug(f"FileUUID for {test_parent_id} is {topic_details['text_file_uuid']}")
-                            return # Test data fully exists
-                    break # Found child by title, but maybe not extraction record
-
-        if test_parent_id and test_child_id:
-            # Parent and child topics exist by title, but maybe not the extraction record.
-            # This case could be refined, but for now, if titles match, assume it's mostly there.
-            # Or, we could decide to recreate the extraction if missing.
-            # For simplicity, if both topics are found by title, we'll assume it's okay.
-            # A more robust check would verify the extraction record specifically.
-            logger.info(f"Test parent '{test_parent_title}' and child 'Extracted Part' topics exist. Assuming extraction record is also present or will be tested by UI.")
-            return
-
-
-        logger.info(f"Creating test data: '{test_parent_title}' with an extraction...")
-        parent_content = "This is some initial text. The part to extract is HERE. And some trailing text."
-        # String: "This is some initial text. The part to extract is HERE. And some trailing text."
-        # Indices:  0123456789012345678901234567890123456789012345678901234567890123456789
-        # "HERE" is at index 28, 29, 30, 31. Length is 4.
-        # Start char: 28, End char: 31 (inclusive)
-        
-        new_parent_id = dm.create_topic(text_content=parent_content, custom_title=test_parent_title)
-        if not new_parent_id:
-            logger.error("Failed to create test parent topic.")
-            return
-
-        # The FileUUID is printed by create_topic's modified log
-        logger.info(f"PARENT_TOPIC_CREATED: Title='{test_parent_title}', ID='{new_parent_id}'. Note its FileUUID from previous log.")
-
-        extracted_text_content = "HERE"
-        new_child_id = dm.create_topic(text_content=extracted_text_content, parent_id=new_parent_id, custom_title="Extracted Part")
-        if not new_child_id:
-            logger.error("Failed to create test child topic.")
-            return
-            
-        start_char = parent_content.find(extracted_text_content)
-        end_char = start_char + len(extracted_text_content) - 1 # Inclusive end
-
-        if start_char != -1:
-            extraction_record_id = dm.create_extraction(new_parent_id, new_child_id, start_char, end_char)
-            if extraction_record_id:
-                logger.info(f"Test extraction record created: ID={extraction_record_id}, Parent={new_parent_id}, Child={new_child_id}, Start={start_char}, End={end_char}")
-            else:
-                logger.error("Failed to create test extraction record.")
-        else: # Should not happen with the hardcoded string
-            logger.error(f"Could not find '{extracted_text_content}' in parent content to create test extraction.")
+    def closeEvent(self, event):
+        # Override QMainWindow's closeEvent to handle unsaved changes or other cleanup
+        if self.data_manager:
+            # Example: Prompt to save changes if any widget is "dirty"
+            # reply = QMessageBox.question(self, 'Message',
+            #                              "Are you sure you want to quit? Any unsaved changes will be lost.",
+            #                              QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            #                              QMessageBox.StandardButton.No)
+            # if reply == QMessageBox.StandardButton.Yes:
+            #     self._handle_close_collection() # Ensure collection state is saved if needed
+            #     event.accept()
+            # else:
+            #     event.ignore()
+            # For now, just close the collection cleanly
+            self._handle_close_collection() 
+        super().closeEvent(event)
 
 
 if __name__ == '__main__':
-    # This part is for testing the MainWindow independently if needed
     app = QApplication(sys.argv)
+    # Ensure MIGRATIONS_DIR exists for testing, as DataManager expects it
+    if not os.path.exists(DataManager.migrations_dir): # Access class variable for default
+        os.makedirs(DataManager.migrations_dir)
+        logger.info(f"Created dummy migrations directory for main_window test: {DataManager.migrations_dir}")
+    
     main_win = MainWindow()
     main_win.show()
     sys.exit(app.exec())
