@@ -21,12 +21,13 @@ A hybrid approach is used:
 
 *   **Topic Content Files:**
     *   Each topic's primary text content is stored in a separate plain text file (e.g., `.txt`).
-    *   All text files reside in a dedicated data directory: `iromo_data/text_files/`.
+    *   All text files reside within a `text_files/` subdirectory inside each collection folder (e.g., `MyCollection/text_files/`).
     *   Files are named using UUIDs (e.g., `abcdef12-3456-7890-abcd-ef1234567890.txt`) to prevent naming conflicts and simplify linking.
 *   **SQLite Database (`iromo.sqlite`):**
-    *   Serves as the central hub for metadata, KT structure, extraction information, and future features (search indexes, statistics).
-    *   **Key Tables:**
-        *   `schema_migrations`: Tracks applied database schema migrations.
+    *   Each collection has its own `iromo.sqlite` database file located at the root of the collection folder (e.g., `MyCollection/iromo.sqlite`).
+    *   This database serves as the central hub for metadata, KT structure, extraction information, and future features for that specific collection.
+    *   **Key Tables (within each collection's database):**
+        *   `schema_migrations`: Tracks applied database schema migrations for this collection's database.
             *   `version` (TEXT, PRIMARY KEY): Filename of the migration script.
             *   `applied_at` (TIMESTAMP): When the migration was applied.
         *   `topics`: Stores information about each piece of knowledge.
@@ -44,19 +45,19 @@ A hybrid approach is used:
             *   `parent_text_start_char` (INTEGER, NOT NULL): Start character offset of the extraction in the parent's text.
             *   `parent_text_end_char` (INTEGER, NOT NULL): End character offset (inclusive) of the extraction in the parent's text.
 *   **Database Migrations:**
-    *   Schema changes are managed via SQL scripts stored in the `migrations/` directory (e.g., `001_initial_schema.sql`).
-    *   The `data_manager.initialize_database()` function applies pending migrations.
+    *   Schema changes are managed via SQL scripts stored in the application's `migrations/` directory (e.g., `001_initial_schema.sql`).
+    *   An instance of the `DataManager` class, specific to each collection, handles database initialization (including applying migrations) via its `initialize_collection_storage()` method.
 *   **Highlighting Mechanism:**
-    *   Extracted text in a parent topic is highlighted with a light blue background.
+    *   Extracted text in a parent topic is highlighted with a light blue background within the context of its collection.
     *   This is managed dynamically by the `TopicEditorWidget` by querying the `extractions` table and applying formatting based on character offsets.
 
 ## 4. Application Architecture
 
-The application follows a model-view-controller like pattern, with distinct components for UI, application logic, and data management.
+The application follows a model-view-controller like pattern. With the introduction of collections, data management is now handled by a `DataManager` class, instantiated per active collection.
 
 ```mermaid
 graph TD
-    User -->|Interacts with| MainWindowUI["MainWindow (UI Orchestrator)"]
+    User -->|Interacts with| MainWindowUI["MainWindow (UI Orchestrator, Manages Active Collection)"]
     
     MainWindowUI -->|Displays & Delegates to| KnowledgeTreeWidgetUI["KnowledgeTreeWidget (QTreeView)"]
     MainWindowUI -->|Displays & Delegates to| TopicEditorWidgetUI["TopicEditorWidget (QTextEdit)"]
@@ -66,10 +67,10 @@ graph TD
     
     MainWindowUI -->|Handles User Actions & Events| AppLogic["Application Logic (in MainWindow methods)"]
     
-    AppLogic -->|Uses| DataManagerMod["DataManager Module"]
+    AppLogic -->|Uses| ActiveDM["Active DataManager Instance (per Collection)"]
     
-    DataManagerMod -->|Reads/Writes| SQLiteDatabaseStore["SQLite DB (iromo.sqlite)"]
-    DataManagerMod -->|Reads/Writes| TextFilesStore["Topic Text Files (*.txt)"]
+    ActiveDM -->|Reads/Writes| CollectionSQLite["Collection's SQLite DB (e.g., MyCollection/iromo.sqlite)"]
+    ActiveDM -->|Reads/Writes| CollectionTextFiles["Collection's Text Files (e.g., MyCollection/text_files/)"]
 
     subgraph UI_Layer [UI (PyQt6 - src/main_window.py, src/knowledge_tree_widget.py, src/topic_editor_widget.py)]
         MainWindowUI
@@ -79,12 +80,12 @@ graph TD
 
     subgraph Core_Logic_Layer [Core Logic & Data (Python - src/data_manager.py)]
         AppLogic
-        DataManagerMod
+        ActiveDM
     end
 
-    subgraph Data_Storage_Layer [Data Store (iromo_data/, migrations/)]
-        SQLiteDatabaseStore
-        TextFilesStore
+    subgraph Data_Storage_Layer [Data Store (Per Collection; App-level: migrations/)]
+        CollectionSQLite
+        CollectionTextFiles
     end
 ```
 
@@ -158,6 +159,8 @@ graph TD
 ## 7. Architectural Design: Collections Feature
 
 This document outlines the architectural changes required to implement the "Collections" feature in the Iromo application.
+
+**Note: The "Collections" feature, as described below, has been implemented in the current version of the codebase. The `DataManager` is now a class, and data paths are relative to the active collection.**
 
 ### 1. File System Structure for Collections
 
