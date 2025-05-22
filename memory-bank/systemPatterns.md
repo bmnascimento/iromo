@@ -151,4 +151,42 @@ graph TD
     *   Consider in-memory SQLite (`:memory:`) for faster, isolated tests.
 ## Testing Patterns
 
-*
+*   **General Framework:** Use `pytest` for its flexibility and plugin ecosystem.
+*   **Qt Specifics:** Utilize `pytest-qt` for testing PyQt6 components, especially the `qtbot` fixture for simulating user interactions and managing the Qt event loop.
+*   **Mocking:** Employ `unittest.mock` (or `pytest-mock`) for isolating components during tests (e.g., mocking `DataManager` when testing UI logic).
+
+### Levels of Testing & TDD Approach:
+
+1.  **Unit Tests (High TDD Focus):**
+    *   **Target:** `src/data_manager.py` (database interactions, file operations), business logic in `AppLogic` (if separated, or testable methods within `MainWindow`), internal logic of custom widgets (`KnowledgeTreeWidget`, `TopicEditorWidget`) not requiring full rendering.
+    *   **Strategy:** Write tests first. Use in-memory SQLite (`:memory:`) or mocks for `DataManager` tests. For widgets, test data processing, model updates, and signal emissions in isolation.
+
+2.  **Integration Tests (Moderate TDD Focus):**
+    *   **Target:** Interactions between `AppLogic` and `DataManager`, `MainWindow` orchestrating widgets, signal/slot connections.
+    *   **Strategy:** Define interaction contracts. Test that components correctly call each other and that data flows as expected. `qtbot.waitSignal` can be useful here.
+
+3.  **UI/End-to-End (E2E) Tests (Selective, Less Pure TDD):**
+    *   **Target:** Critical user workflows through the actual GUI.
+    *   **Strategy:** Use `pytest-qt`'s `qtbot` to simulate user actions (clicks, typing). Focus on verifying behavior and key UI state changes, not pixel-perfect appearance. These are good for regression prevention.
+
+### TDD for GUI Components:
+
+*   **Architect for Testability:**
+    *   Consider patterns like Model-View-Presenter (MVP) or Model-View-ViewModel (MVVM) to separate presentation logic from views, making the Presenter/ViewModel highly unit-testable with TDD.
+    *   Strive to make `AppLogic` (or equivalent controller/presenter classes) testable in isolation from the actual UI rendering.
+*   **Test Widget Behavior & API:**
+    *   For custom widgets (`KnowledgeTreeWidget`, `TopicEditorWidget`):
+        *   Test their public methods (e.g., `load_topic_content`).
+        *   Verify correct signal emissions in response to internal logic or simulated events.
+        *   Test how they update their internal models or state based on input.
+*   **Focus on Behavior, Not Exact Appearance:** GUI tests should confirm functionality, not be overly sensitive to minor visual changes.
+
+### Specific Recommendations for Iromo:
+
+*   **`DataManager`:** Prime candidate for rigorous TDD.
+*   **`AppLogic`:** If refactored into a separate class, TDD is highly applicable. If methods remain in `MainWindow`, test them by instantiating `MainWindow` and mocking its dependencies.
+*   **Custom Widgets:** Use `pytest-qt` to test their data handling, model updates, and signal emissions.
+*   **Critical Flows:** Implement UI tests for core functionalities like topic creation and text extraction using `qtbot`.
+
+---
+2025-05-21 22:57:54 - Added detailed GUI testing strategies and TDD recommendations.
