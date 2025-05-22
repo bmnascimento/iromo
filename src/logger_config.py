@@ -24,8 +24,9 @@ def get_log_file_path() -> Path:
 
 def setup_logging():
     """Configures the application-wide logger."""
-    logger = logging.getLogger(APP_NAME)
-    logger.setLevel(logging.INFO)
+    # Get the root logger so all module loggers inherit this configuration
+    logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG) # Set root logger level to DEBUG
 
     # Prevent multiple handlers if setup_logging is called more than once (e.g., in tests)
     if logger.hasHandlers():
@@ -50,10 +51,10 @@ def setup_logging():
     # To enable, uncomment the following lines.
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
-    console_handler.setLevel(logging.INFO) # Set to INFO to match file handler, can be changed to DEBUG if more verbosity is needed
+    console_handler.setLevel(logging.DEBUG) # Changed to DEBUG to capture all messages
     logger.addHandler(console_handler)
 
-    logger.info(f"Logging initialized. Log file: {log_file_path}. Console output enabled.")
+    logger.info(f"Logging initialized. Log file: {log_file_path}. Console output enabled. Log level: DEBUG")
 
 if __name__ == '__main__':
     # Example usage:

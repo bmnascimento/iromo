@@ -38,26 +38,54 @@ class KnowledgeTreeWidget(QTreeView):
         # Set column count and header data again after clearing
         self.model.setHorizontalHeaderLabels(['Topic Title'])
         # Add placeholder when tree is empty and no collection is loaded
-        self._add_placeholder_if_empty("No collection open or collection is empty.")
+        logger.info("clear_tree: Called")
+        placeholder_text = "No collection open or collection is empty."
+        logger.info(f"clear_tree: Requesting placeholder: '{placeholder_text}'") # Adjusted log
+        self._add_placeholder_if_empty(placeholder_text)
 
 
     def _add_placeholder_if_empty(self, text="No topics yet. Add one!"):
-        """Adds a non-selectable, non-editable placeholder item if the tree is empty."""
+        """Adds or updates a placeholder item if the tree would otherwise be empty."""
+        logger.info(f"_add_placeholder_if_empty: Called with text: '{text}'. Current rowCount: {self.model.rowCount()}")
         if self.model.rowCount() == 0:
+            logger.info(f"_add_placeholder_if_empty: rowCount is 0. Adding new placeholder: '{text}'")
             placeholder_item = QStandardItem(text)
             placeholder_item.setEditable(False)
             placeholder_item.setEnabled(False) # Grayed out
             self.model.appendRow(placeholder_item)
+        elif self.model.rowCount() == 1:
+            item = self.model.item(0)
+            if item and item.data(Qt.ItemDataRole.UserRole) is None: # It's a placeholder
+                old_text = item.text()
+                logger.info(f"_add_placeholder_if_empty: rowCount is 1 and item is placeholder. Updating text from '{old_text}' to '{text}'")
+                item.setText(text)
+                item.setEditable(False) # Ensure it remains non-editable
+                item.setEnabled(False) # Ensure it remains disabled
+            else:
+                logger.info(f"_add_placeholder_if_empty: rowCount is 1, but not a recognized placeholder (item text: '{item.text() if item else 'None'}'). Doing nothing.")
+        else:
+            logger.info(f"_add_placeholder_if_empty: rowCount is {self.model.rowCount()}. Not a candidate for placeholder. Doing nothing.")
 
     def load_tree_data(self, data_manager_instance: DataManager):
         """Loads the topic hierarchy from the given DataManager instance and populates the tree."""
+        logger.info(f"load_tree_data: Called. DataManager instance present: {data_manager_instance is not None}")
         if not data_manager_instance:
-            logger.warning("load_tree_data called with no DataManager instance.")
+            logger.warning("load_tree_data: No DataManager instance provided.")
             self.clear_tree() # Show "No collection open..."
             return
 
         self.clear_tree() # Clear previous content and placeholder
         topics_data = data_manager_instance.get_topic_hierarchy()
+        logger.info(f"load_tree_data: Fetched topics_data. Length: {len(topics_data) if topics_data else 'None'}")
+
+        # If actual topics are being loaded, remove the default placeholder set by clear_tree()
+        if topics_data:
+            if self.model.rowCount() == 1:
+                first_item = self.model.item(0)
+                # Check if it's a placeholder (no UserRole data)
+                if first_item and first_item.data(Qt.ItemDataRole.UserRole) is None:
+                    logger.info("load_tree_data: Actual topics found, removing placeholder set by clear_tree.")
+                    self.model.removeRow(0)
         
         items = {}
         children_map = {}
@@ -97,8 +125,6 @@ class KnowledgeTreeWidget(QTreeView):
         for root_item in root_items:
             self.model.appendRow(root_item)
             
-        if not topics_data:
-            self._add_placeholder_if_empty("This collection is empty. Add a topic!")
         
         self.expandAll() # Optionally expand all items after loading
 
@@ -148,11 +174,26 @@ class KnowledgeTreeWidget(QTreeView):
 
 
     def add_topic_item(self, title: str, topic_id: str, parent_id: str = None):
+        logger.info(f"add_topic_item: Called with title='{title}', topic_id='{topic_id}', parent_id='{parent_id}'")
+        logger.info(f"add_topic_item: Current model rowCount before placeholder check: {self.model.rowCount()}")
         # Remove placeholder if it exists and is the only item
         if self.model.rowCount() == 1:
-            first_item_data = self.model.item(0).data(Qt.ItemDataRole.UserRole)
-            if first_item_data is None: # Likely a placeholder
-                 self.model.removeRow(0)
+            first_item = self.model.item(0)
+            if first_item: # Ensure item exists
+                first_item_data = first_item.data(Qt.ItemDataRole.UserRole)
+                first_item_text = first_item.text()
+                logger.info(f"add_topic_item: Checking placeholder. rowCount is 1. First item text: '{first_item_text}', data: {first_item_data}")
+                if first_item_data is None: # Likely a placeholder
+                    logger.info("add_topic_item: Placeholder detected (rowCount=1, item data is None). Removing row 0.")
+                    self.model.removeRow(0)
+                else:
+                    logger.info("add_topic_item: rowCount is 1, but first item has data. Not a placeholder by this check.")
+            else:
+                logger.warning("add_topic_item: rowCount is 1, but model.item(0) is None. Cannot check for placeholder.")
+        elif self.model.rowCount() == 0:
+            logger.info("add_topic_item: model rowCount is 0. No placeholder to remove.")
+        else:
+            logger.info(f"add_topic_item: model rowCount is {self.model.rowCount()}. Not attempting placeholder removal.")
 
         item = QStandardItem(title)
         item.setData(topic_id, Qt.ItemDataRole.UserRole)
