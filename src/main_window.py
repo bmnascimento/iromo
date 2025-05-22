@@ -7,6 +7,9 @@ from PyQt6.QtCore import Qt
 from knowledge_tree_widget import KnowledgeTreeWidget
 from topic_editor_widget import TopicEditorWidget
 import data_manager as dm # For initializing the database
+import logging
+
+logger = logging.getLogger(__name__)
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -98,24 +101,24 @@ class MainWindow(QMainWindow):
 
     # --- Signal Handlers ---
     def handle_topic_selected(self, topic_id):
-        print(f"Main Window: Topic selected - ID: {topic_id}")
+        logger.info(f"Topic selected - ID: {topic_id}")
         # Before loading new content, check if current editor content needs saving
         # For now, we'll just load. A "dirty" flag mechanism would be better.
         if self.editor_widget.current_topic_id and self.editor_widget.current_topic_id != topic_id:
             # Potentially prompt to save changes for self.editor_widget.current_topic_id
             # For MVP, we can save automatically or just switch. Let's save current before switching.
-            print(f"Saving content for {self.editor_widget.current_topic_id} before switching.")
+            logger.info(f"Saving content for {self.editor_widget.current_topic_id} before switching to {topic_id}.")
             self.save_current_topic_content(prompt_if_no_topic=False)
 
 
         self.editor_widget.load_topic_content(topic_id)
 
     def handle_topic_title_changed(self, topic_id, new_title):
-        print(f"Main Window: Topic title changed - ID: {topic_id}, New Title: '{new_title}'")
+        logger.info(f"Topic title changed - ID: {topic_id}, New Title: '{new_title}'")
         # Persist the change to the database
         success = dm.update_topic_title(topic_id, new_title)
         if not success:
-            print(f"Error persisting title change for {topic_id} to '{new_title}'")
+            logger.error(f"Error persisting title change for {topic_id} to '{new_title}'")
             # Optionally, revert the title in the tree or show an error to the user
             # For now, we'll assume the tree widget's display is the source of truth until AppLogic handles this
             # self.tree_widget.update_topic_item_title(topic_id, dm.get_topic_title(topic_id)) # Needs get_topic_title
@@ -127,14 +130,14 @@ class MainWindow(QMainWindow):
             content = self.editor_widget.get_current_content()
             success = dm.save_topic_content(current_editor_topic_id, content)
             if success:
-                print(f"Content for topic {current_editor_topic_id} saved successfully.")
+                logger.info(f"Content for topic {current_editor_topic_id} saved successfully.")
                 # Refresh highlights in case new extractions were made and saved with content
                 # self.editor_widget._apply_existing_highlights() # Or do this on next load
             else:
-                print(f"Failed to save content for topic {current_editor_topic_id}.")
+                logger.error(f"Failed to save content for topic {current_editor_topic_id}.")
                 # Optionally, show an error message to the user
         elif prompt_if_no_topic:
-            print("No topic loaded in the editor to save.")
+            logger.info("No topic loaded in the editor to save.")
             # Optionally, show a message to the user (e.g., in status bar)
 
 
@@ -146,18 +149,18 @@ class MainWindow(QMainWindow):
         """Handles the text extraction action."""
         current_parent_topic_id = self.editor_widget.current_topic_id
         if not current_parent_topic_id:
-            print("No parent topic selected/loaded in editor to extract from.")
+            logger.warning("No parent topic selected/loaded in editor to extract from.")
             # Optionally: show a status message to the user
             return
 
         selected_text, start_char, end_char = self.editor_widget.get_selected_text_and_offsets()
 
         if not selected_text:
-            print("No text selected to extract.")
+            logger.info("No text selected to extract.")
             # Optionally: show a status message to the user
             return
 
-        print(f"Attempting to extract: '{selected_text}' from parent {current_parent_topic_id} (chars {start_char}-{end_char})")
+        logger.info(f"Attempting to extract: '{selected_text}' from parent {current_parent_topic_id} (chars {start_char}-{end_char})")
 
         # 1. Save current parent topic content FIRST, as offsets depend on current state
         #    If content hasn't changed, this is quick. If it has, it ensures consistency.
@@ -168,7 +171,7 @@ class MainWindow(QMainWindow):
         child_topic_id = dm.create_topic(text_content=selected_text, parent_id=current_parent_topic_id)
 
         if not child_topic_id:
-            print("Failed to create child topic for extraction.")
+            logger.error("Failed to create child topic for extraction.")
             # Optionally: show an error message
             return
         
@@ -183,7 +186,7 @@ class MainWindow(QMainWindow):
         )
 
         if not extraction_id:
-            print("Failed to record extraction in database.")
+            logger.error("Failed to record extraction in database.")
             # Potentially: delete the orphaned child_topic_id if critical
             # dm.delete_topic(child_topic_id) # Would need delete_topic
             # Optionally: show an error message
@@ -199,7 +202,7 @@ class MainWindow(QMainWindow):
         #    But reloading all ensures consistency if other changes occurred.
         self.editor_widget._apply_existing_highlights() # Reloads all for current topic
 
-        print(f"Extraction successful: New topic '{child_topic_id}' created and linked.")
+        logger.info(f"Extraction successful: New topic '{child_topic_id}' created and linked.")
         # Optionally: select the new child topic in the tree and editor
         # self.tree_widget.setCurrentIndex(self.tree_widget._topic_item_map[child_topic_id].index())
         # self.handle_topic_selected(child_topic_id)
@@ -229,10 +232,10 @@ class MainWindow(QMainWindow):
                     extractions = dm.get_extractions_for_parent(test_parent_id)
                     for extr in extractions:
                         if extr['child_topic_id'] == test_child_id:
-                            print(f"Test data '{test_parent_title}' and its extraction record already exist.")
+                            logger.info(f"Test data '{test_parent_title}' and its extraction record already exist.")
                             # Optionally, print FileUUID for debugging
                             # topic_details = dm.get_topic_details(test_parent_id) # Would need this function
-                            # if topic_details: print(f"FileUUID for {test_parent_id} is {topic_details['text_file_uuid']}")
+                            # if topic_details: logger.debug(f"FileUUID for {test_parent_id} is {topic_details['text_file_uuid']}")
                             return # Test data fully exists
                     break # Found child by title, but maybe not extraction record
 
@@ -242,11 +245,11 @@ class MainWindow(QMainWindow):
             # Or, we could decide to recreate the extraction if missing.
             # For simplicity, if both topics are found by title, we'll assume it's okay.
             # A more robust check would verify the extraction record specifically.
-            print(f"Test parent '{test_parent_title}' and child 'Extracted Part' topics exist. Assuming extraction record is also present or will be tested by UI.")
+            logger.info(f"Test parent '{test_parent_title}' and child 'Extracted Part' topics exist. Assuming extraction record is also present or will be tested by UI.")
             return
 
 
-        print(f"Creating test data: '{test_parent_title}' with an extraction...")
+        logger.info(f"Creating test data: '{test_parent_title}' with an extraction...")
         parent_content = "This is some initial text. The part to extract is HERE. And some trailing text."
         # String: "This is some initial text. The part to extract is HERE. And some trailing text."
         # Indices:  0123456789012345678901234567890123456789012345678901234567890123456789
@@ -255,16 +258,16 @@ class MainWindow(QMainWindow):
         
         new_parent_id = dm.create_topic(text_content=parent_content, custom_title=test_parent_title)
         if not new_parent_id:
-            print("Failed to create test parent topic.")
+            logger.error("Failed to create test parent topic.")
             return
 
         # The FileUUID is printed by create_topic's modified log
-        print(f"PARENT_TOPIC_CREATED: Title='{test_parent_title}', ID='{new_parent_id}'. Note its FileUUID from previous log.")
+        logger.info(f"PARENT_TOPIC_CREATED: Title='{test_parent_title}', ID='{new_parent_id}'. Note its FileUUID from previous log.")
 
         extracted_text_content = "HERE"
         new_child_id = dm.create_topic(text_content=extracted_text_content, parent_id=new_parent_id, custom_title="Extracted Part")
         if not new_child_id:
-            print("Failed to create test child topic.")
+            logger.error("Failed to create test child topic.")
             return
             
         start_char = parent_content.find(extracted_text_content)
@@ -273,11 +276,11 @@ class MainWindow(QMainWindow):
         if start_char != -1:
             extraction_record_id = dm.create_extraction(new_parent_id, new_child_id, start_char, end_char)
             if extraction_record_id:
-                print(f"Test extraction record created: ID={extraction_record_id}, Parent={new_parent_id}, Child={new_child_id}, Start={start_char}, End={end_char}")
+                logger.info(f"Test extraction record created: ID={extraction_record_id}, Parent={new_parent_id}, Child={new_child_id}, Start={start_char}, End={end_char}")
             else:
-                print("Failed to create test extraction record.")
+                logger.error("Failed to create test extraction record.")
         else: # Should not happen with the hardcoded string
-            print(f"Error: Could not find '{extracted_text_content}' in parent content to create test extraction.")
+            logger.error(f"Could not find '{extracted_text_content}' in parent content to create test extraction.")
 
 
 if __name__ == '__main__':

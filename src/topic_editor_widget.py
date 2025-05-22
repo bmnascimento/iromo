@@ -1,8 +1,11 @@
 from PyQt6.QtWidgets import QTextEdit, QApplication
 from PyQt6.QtGui import QTextCursor, QColor, QTextCharFormat, QSyntaxHighlighter, QFont
 from PyQt6.QtCore import Qt, pyqtSignal
+import logging
 
 import data_manager as dm # Assuming data_manager.py is in the same src directory
+
+logger = logging.getLogger(__name__)
 
 class TopicEditorWidget(QTextEdit):
     # Signal emitted when content might have changed and needs saving
@@ -26,15 +29,15 @@ class TopicEditorWidget(QTextEdit):
 
     def load_topic_content(self, topic_id):
         """Loads and displays the content for the given topic_id."""
-        print(f"[TEW] load_topic_content: Called for topic_id: {topic_id}")
+        logger.info(f"Loading content for topic_id: {topic_id}")
         self.clear_content() # Clear previous content and highlights
-        # print(f"[TEW] load_topic_content: After clear_content. Current text: '{self._get_document_text_for_logging()}'")
+        # logger.debug(f"After clear_content. Current text: '{self._get_document_text_for_logging()}'")
         content = dm.get_topic_content(topic_id)
         if content is not None:
             self.current_topic_id = topic_id
-            # print(f"[TEW] load_topic_content: Setting plain text for {topic_id}: '{content.replace('\n', '\\n')[:100]}'")
+            # logger.debug(f"Setting plain text for {topic_id}: '{content.replace('\n', '\\n')[:100]}'")
             self.setPlainText(content) # Use setPlainText to avoid issues if content has accidental HTML
-            print(f"[TEW] load_topic_content: After setPlainText for {topic_id}. Doc text: '{self._get_document_text_for_logging()}'")
+            logger.debug(f"After setPlainText for {topic_id}. Doc text: '{self._get_document_text_for_logging()}'")
 
             # Explicitly reset all character formatting to default before applying new highlights
             # This is to prevent persistent formatting issues.
@@ -46,29 +49,30 @@ class TopicEditorWidget(QTextEdit):
             cursor.setCharFormat(default_format)
             cursor.clearSelection()
             self.setTextCursor(cursor) # Ensure the cursor is updated
-            print(f"[TEW] load_topic_content: Applied default char format to entire document for topic {topic_id}.")
+            logger.debug(f"Applied default char format to entire document for topic {topic_id}.")
 
             self._apply_existing_highlights()
         else:
             self.current_topic_id = None
             self.setPlaceholderText(f"Could not load content for topic {topic_id}.")
-        # print(f"[TEW] load_topic_content: Finished for topic_id: {topic_id}")
+            logger.warning(f"Content for topic_id {topic_id} was None.")
+        # logger.debug(f"Finished load_topic_content for topic_id: {topic_id}")
 
     def _apply_existing_highlights(self):
         """Applies highlights for all extractions already made from the current topic."""
-        print(f"[TEW] _apply_existing_highlights: Called for topic {self.current_topic_id}")
+        logger.debug(f"Applying existing highlights for topic {self.current_topic_id}")
         if not self.current_topic_id:
-            print(f"[TEW] _apply_existing_highlights: No current_topic_id, returning.")
+            logger.debug("No current_topic_id, returning from _apply_existing_highlights.")
             return
         
         extractions = dm.get_extractions_for_parent(self.current_topic_id)
-        print(f"[TEW] _apply_existing_highlights: Found {len(extractions)} extractions for topic {self.current_topic_id}: {extractions}")
+        logger.debug(f"Found {len(extractions)} extractions for topic {self.current_topic_id}: {extractions}")
         for i, extr in enumerate(extractions):
             start_char = extr['parent_text_start_char']
             end_char = extr['parent_text_end_char']
-            print(f"[TEW] _apply_existing_highlights: Applying highlight {i+1}/{len(extractions)}: start={start_char}, end={end_char}")
+            logger.debug(f"Applying highlight {i+1}/{len(extractions)}: start={start_char}, end={end_char}")
             self.apply_extraction_highlight(start_char, end_char)
-        # print(f"[TEW] _apply_existing_highlights: Finished for topic {self.current_topic_id}")
+        # logger.debug(f"Finished _apply_existing_highlights for topic {self.current_topic_id}")
 
     def get_current_content(self):
         """Returns the plain text content currently in the editor."""
@@ -97,10 +101,10 @@ class TopicEditorWidget(QTextEdit):
         """
         doc_text_before_highlight = self._get_document_text_for_logging()
         doc_len = len(self.toPlainText())
-        print(f"[TEW] apply_extraction_highlight: START. For topic {self.current_topic_id}. Input start={start_char}, end={end_char}. Doc len: {doc_len}. Doc text: '{doc_text_before_highlight}'")
+        logger.debug(f"apply_extraction_highlight: START. For topic {self.current_topic_id}. Input start={start_char}, end={end_char}. Doc len: {doc_len}. Doc text: '{doc_text_before_highlight}'")
 
         if start_char is None or end_char is None or start_char < 0 or end_char < start_char or end_char >= doc_len :
-            print(f"[TEW] apply_extraction_highlight: WARNING - Invalid range: start={start_char}, end={end_char}, doc_len={doc_len}. Skipping highlight.")
+            logger.warning(f"apply_extraction_highlight: Invalid range: start={start_char}, end={end_char}, doc_len={doc_len}. Skipping highlight.")
             return
 
         cursor = self.textCursor()
@@ -113,39 +117,39 @@ class TopicEditorWidget(QTextEdit):
         
         # Safety check: ensure selection_end_pos does not exceed document length
         if selection_end_pos > doc_len:
-            print(f"[TEW] apply_extraction_highlight: WARNING - selection_end_pos ({selection_end_pos}) exceeds doc_len ({doc_len}). Clamping to {doc_len}.")
+            logger.warning(f"apply_extraction_highlight: selection_end_pos ({selection_end_pos}) exceeds doc_len ({doc_len}). Clamping to {doc_len}.")
             selection_end_pos = doc_len
             if start_char >= selection_end_pos and doc_len > 0 : # If start is now also out of bounds due to clamping
-                 print(f"[TEW] apply_extraction_highlight: WARNING - start_char ({start_char}) is >= clamped selection_end_pos ({selection_end_pos}). Skipping highlight.")
+                 logger.warning(f"apply_extraction_highlight: start_char ({start_char}) is >= clamped selection_end_pos ({selection_end_pos}). Skipping highlight.")
                  return
             elif doc_len == 0 and start_char == 0 and selection_end_pos == 0: # Highlighting empty doc, technically valid but unusual
                  pass # allow to proceed if it's a zero-length selection on empty doc
             elif start_char >= selection_end_pos : # General case for start >= end after clamping
-                 print(f"[TEW] apply_extraction_highlight: WARNING - start_char ({start_char}) is >= clamped selection_end_pos ({selection_end_pos}). Skipping highlight.")
+                 logger.warning(f"apply_extraction_highlight: start_char ({start_char}) is >= clamped selection_end_pos ({selection_end_pos}). Skipping highlight.")
                  return
 
 
         cursor.setPosition(selection_end_pos, QTextCursor.MoveMode.KeepAnchor)
         
         selected_text_for_log = cursor.selectedText().replace('\n', '\\n')[:60]
-        print(f"[TEW] apply_extraction_highlight: Cursor set. Selection: start={cursor.selectionStart()}, end={cursor.selectionEnd()}, text='{selected_text_for_log}...'")
+        logger.debug(f"apply_extraction_highlight: Cursor set. Selection: start={cursor.selectionStart()}, end={cursor.selectionEnd()}, text='{selected_text_for_log}...'")
 
         if not (cursor.selectionStart() == start_char and cursor.selectionEnd() == selection_end_pos):
-            print(f"[TEW] apply_extraction_highlight: CRITICAL WARNING - Selection mismatch! Expected sel_start={start_char}, sel_end={selection_end_pos}. Got actual_sel_start={cursor.selectionStart()}, actual_sel_end={cursor.selectionEnd()}. This indicates a serious issue in cursor positioning.")
+            logger.critical(f"apply_extraction_highlight: Selection mismatch! Expected sel_start={start_char}, sel_end={selection_end_pos}. Got actual_sel_start={cursor.selectionStart()}, actual_sel_end={cursor.selectionEnd()}. This indicates a serious issue in cursor positioning.")
             # Potentially skip merging format if selection is not as expected
             # return
 
         char_format = QTextCharFormat()
         char_format.setBackground(color)
         cursor.mergeCharFormat(char_format)
-        print(f"[TEW] apply_extraction_highlight: Char format merged with background {color.name()}.")
+        logger.debug(f"apply_extraction_highlight: Char format merged with background {color.name()}.")
         
         # Clear selection after applying format and set cursor position
         final_cursor_pos = cursor.selectionEnd() # Keep track of where selection ended
         cursor.clearSelection()
         cursor.setPosition(final_cursor_pos) # Place cursor at the end of what was the selection
         self.setTextCursor(cursor)
-        # print(f"[TEW] apply_extraction_highlight: FINISHED. Cursor at {cursor.position()}.")
+        # logger.debug(f"apply_extraction_highlight: FINISHED. Cursor at {cursor.position()}.")
 
 
     def clear_content(self):
@@ -204,11 +208,11 @@ if __name__ == '__main__':
     def print_selection():
         text, start, end = editor_widget.get_selected_text_and_offsets()
         if text:
-            print(f"Selected: '{text}', Start: {start}, End: {end}")
+            logger.info(f"Selected: '{text}', Start: {start}, End: {end}")
             # Test highlighting the selection
             editor_widget.apply_extraction_highlight(start, end, QColor("lightgreen"))
         else:
-            print("No text selected.")
+            logger.info("No text selected.")
             
     def clear_editor():
         editor_widget.clear_content()

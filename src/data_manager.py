@@ -3,6 +3,10 @@ import uuid
 import os
 from datetime import datetime
 import glob
+import logging
+
+# Get a logger for this module
+logger = logging.getLogger(__name__)
 
 DB_NAME = "iromo.sqlite"
 TEXT_FILES_DIR = "iromo_data/text_files"
@@ -36,7 +40,7 @@ def _apply_migrations(conn):
     for migration_file_path in migration_files:
         migration_filename = os.path.basename(migration_file_path)
         if migration_filename not in applied_versions:
-            print(f"Applying migration: {migration_filename}...")
+            logger.info(f"Applying migration: {migration_filename}...")
             try:
                 with open(migration_file_path, 'r') as f:
                     sql_script = f.read()
@@ -45,10 +49,10 @@ def _apply_migrations(conn):
                 cursor.execute("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
                                (migration_filename, datetime.now()))
                 conn.commit()
-                print(f"Successfully applied migration: {migration_filename}")
+                logger.info(f"Successfully applied migration: {migration_filename}")
             except sqlite3.Error as e:
                 conn.rollback()
-                print(f"Error applying migration {migration_filename}: {e}")
+                logger.error(f"Error applying migration {migration_filename}: {e}")
                 raise # Re-raise the exception to halt further operations if a migration fails
 
 def initialize_database():
@@ -57,23 +61,23 @@ def initialize_database():
     """
     if not os.path.exists(TEXT_FILES_DIR):
         os.makedirs(TEXT_FILES_DIR)
-        print(f"Created directory: {TEXT_FILES_DIR}")
+        logger.info(f"Created directory: {TEXT_FILES_DIR}")
     
     if not os.path.exists(MIGRATIONS_DIR):
         os.makedirs(MIGRATIONS_DIR)
-        print(f"Created directory: {MIGRATIONS_DIR}")
+        logger.info(f"Created directory: {MIGRATIONS_DIR}")
         # Create a placeholder for the first migration if it doesn't exist
         # This helps guide the user to create the actual 001_initial_schema.sql
         if not glob.glob(os.path.join(MIGRATIONS_DIR, "*.sql")):
-             print(f"No migration scripts found in {MIGRATIONS_DIR}. Please create '001_initial_schema.sql'.")
+             logger.warning(f"No migration scripts found in {MIGRATIONS_DIR}. Please create '001_initial_schema.sql'.")
 
 
     conn = get_db_connection()
     try:
         _apply_migrations(conn)
-        print(f"Database '{DB_NAME}' initialization and migration check complete.")
+        logger.info(f"Database '{DB_NAME}' initialization and migration check complete.")
     except Exception as e:
-        print(f"Database initialization failed: {e}")
+        logger.error(f"Database initialization failed: {e}")
     finally:
         conn.close()
 
@@ -114,13 +118,17 @@ def create_topic(text_content="", parent_id=None, custom_title=None):
         """, (topic_id, parent_id, title, text_file_uuid_str, now, now))
         
         conn.commit()
-        print(f"Topic '{title}' (ID: {topic_id}) created successfully.")
+        logger.info(f"Topic '{title}' (ID: {topic_id}) created successfully.")
         return topic_id
     except Exception as e:
         conn.rollback()
-        print(f"Error creating topic: {e}")
+        logger.error(f"Error creating topic: {e}")
         if os.path.exists(text_file_path):
-            os.remove(text_file_path) # Clean up orphaned text file
+            try:
+                os.remove(text_file_path) # Clean up orphaned text file
+                logger.info(f"Cleaned up orphaned text file: {text_file_path}")
+            except OSError as ose:
+                logger.error(f"Error removing orphaned text file {text_file_path}: {ose}")
         return None
     finally:
         conn.close()
@@ -144,7 +152,7 @@ def get_topic_content(topic_id):
         cursor.execute("SELECT text_file_uuid FROM topics WHERE id = ?", (topic_id,))
         row = cursor.fetchone()
     except sqlite3.Error as e:
-        print(f"Database error fetching text_file_uuid for topic {topic_id}: {e}")
+        logger.error(f"Database error fetching text_file_uuid for topic {topic_id}: {e}")
         # row remains None, the existing 'if row:' logic will handle this
     finally:
         if conn: # conn is guaranteed to be defined by this point from get_db_connection()
@@ -156,13 +164,13 @@ def get_topic_content(topic_id):
             with open(text_file_path, 'r', encoding='utf-8') as f:
                 return f.read()
         except FileNotFoundError:
-            print(f"Error: Text file not found for topic {topic_id} at {text_file_path}")
+            logger.error(f"Text file not found for topic {topic_id} at {text_file_path}")
             return None
         except Exception as e:
-            print(f"Error reading text file for topic {topic_id}: {e}")
+            logger.error(f"Error reading text file for topic {topic_id}: {e}")
             return None
     else:
-        print(f"Error: Topic with ID {topic_id} not found in database.")
+        logger.warning(f"Topic with ID {topic_id} not found in database when trying to get content.")
         return None
 
 def save_topic_content(topic_id, content):
@@ -176,7 +184,7 @@ def save_topic_content(topic_id, content):
     row = cursor.fetchone()
 
     if not row:
-        print(f"Error: Topic with ID {topic_id} not found for saving content.")
+        logger.error(f"Topic with ID {topic_id} not found for saving content.")
         conn.close()
         return False
 
@@ -189,11 +197,11 @@ def save_topic_content(topic_id, content):
         
         cursor.execute("UPDATE topics SET updated_at = ? WHERE id = ?", (now, topic_id))
         conn.commit()
-        print(f"Content for topic '{topic_id}' saved successfully.")
+        logger.info(f"Content for topic '{topic_id}' saved successfully.")
         return True
     except Exception as e:
         conn.rollback()
-        print(f"Error saving content for topic {topic_id}: {e}")
+        logger.error(f"Error saving content for topic {topic_id}: {e}")
         return False
     finally:
         conn.close()
@@ -204,7 +212,7 @@ def update_topic_title(topic_id, new_title):
     Returns True on success, False on failure.
     """
     if not new_title or not new_title.strip():
-        print("Error: New title cannot be empty.")
+        logger.error("New title cannot be empty.")
         return False
 
     conn = get_db_connection()
@@ -214,15 +222,15 @@ def update_topic_title(topic_id, new_title):
     try:
         cursor.execute("UPDATE topics SET title = ?, updated_at = ? WHERE id = ?", (new_title, now, topic_id))
         if cursor.rowcount == 0:
-            print(f"Error: Topic with ID {topic_id} not found for title update.")
+            logger.error(f"Topic with ID {topic_id} not found for title update.")
             conn.close()
             return False
         conn.commit()
-        print(f"Title for topic '{topic_id}' updated to '{new_title}'.")
+        logger.info(f"Title for topic '{topic_id}' updated to '{new_title}'.")
         return True
     except Exception as e:
         conn.rollback()
-        print(f"Error updating title for topic {topic_id}: {e}")
+        logger.error(f"Error updating title for topic {topic_id}: {e}")
         return False
     finally:
         conn.close()
@@ -243,7 +251,7 @@ def get_topic_hierarchy():
         topics = [dict(row) for row in cursor.fetchall()]
         return topics
     except Exception as e:
-        print(f"Error fetching topic hierarchy: {e}")
+        logger.error(f"Error fetching topic hierarchy: {e}")
         return []
     finally:
         conn.close()
@@ -262,12 +270,12 @@ def create_extraction(parent_topic_id, child_topic_id, start_char, end_char):
         # First, ensure both parent and child topics exist
         cursor.execute("SELECT id FROM topics WHERE id = ?", (parent_topic_id,))
         if not cursor.fetchone():
-            print(f"Error creating extraction: Parent topic {parent_topic_id} not found.")
+            logger.error(f"Error creating extraction: Parent topic {parent_topic_id} not found.")
             return None
         
         cursor.execute("SELECT id FROM topics WHERE id = ?", (child_topic_id,))
         if not cursor.fetchone():
-            print(f"Error creating extraction: Child topic {child_topic_id} not found.")
+            logger.error(f"Error creating extraction: Child topic {child_topic_id} not found.")
             return None
 
         cursor.execute("""
@@ -279,16 +287,16 @@ def create_extraction(parent_topic_id, child_topic_id, start_char, end_char):
         cursor.execute("UPDATE topics SET updated_at = ? WHERE id = ?", (datetime.now(), parent_topic_id))
 
         conn.commit()
-        print(f"Extraction from '{parent_topic_id}' to '{child_topic_id}' (ID: {extraction_id}) created successfully.")
+        logger.info(f"Extraction from '{parent_topic_id}' to '{child_topic_id}' (ID: {extraction_id}) created successfully.")
         return extraction_id
     except sqlite3.IntegrityError as e:
         # This could happen if child_topic_id is not unique in extractions, or foreign key constraints fail
         conn.rollback()
-        print(f"Error creating extraction (IntegrityError): {e}. Ensure child_topic_id is unique for extractions and both topics exist.")
+        logger.error(f"Error creating extraction (IntegrityError): {e}. Ensure child_topic_id is unique for extractions and both topics exist.")
         return None
     except Exception as e:
         conn.rollback()
-        print(f"Error creating extraction: {e}")
+        logger.error(f"Error creating extraction: {e}")
         return None
     finally:
         conn.close()
@@ -310,7 +318,7 @@ def get_extractions_for_parent(parent_topic_id):
         extractions = [dict(row) for row in cursor.fetchall()]
         return extractions
     except Exception as e:
-        print(f"Error fetching extractions for parent {parent_topic_id}: {e}")
+        logger.error(f"Error fetching extractions for parent {parent_topic_id}: {e}")
         return []
     finally:
         conn.close()
@@ -322,49 +330,49 @@ def get_extractions_for_parent(parent_topic_id):
 if __name__ == '__main__':
     # This block is now only for manually initializing the database if needed.
     # For testing, use a dedicated test runner and temporary databases.
-    print("Initializing Iromo database (if needed)...")
+    logger.info("Initializing Iromo database (if needed) when data_manager.py is run directly...")
     initialize_database()
-    print("Initialization process finished.")
+    logger.info("Initialization process finished when data_manager.py is run directly.")
     # Example: You could add a test topic creation here for manual dev checks,
     # but it's better to do this in a separate test script or via the UI.
     #
     # # --- Manual test calls for new functions ---
     # # Ensure DB is initialized before running these
-    # print("\n--- Running manual tests for data_manager functions ---")
+    # logger.info("\n--- Running manual tests for data_manager functions ---")
     # test_topic_id = create_topic(text_content="Initial content for testing get/save.", custom_title="Test Topic for Content")
     #
     # if test_topic_id:
-    #     print(f"\n[Test] Original content for {test_topic_id}:")
+    #     logger.info(f"\n[Test] Original content for {test_topic_id}:")
     #     original_content = get_topic_content(test_topic_id)
-    #     print(original_content)
+    #     logger.info(original_content)
     #
-    #     print(f"\n[Test] Saving new content for {test_topic_id}...")
+    #     logger.info(f"\n[Test] Saving new content for {test_topic_id}...")
     #     save_topic_content(test_topic_id, "This is the updated content. It's much better now!")
     #
-    #     print(f"\n[Test] Retrieving updated content for {test_topic_id}:")
+    #     logger.info(f"\n[Test] Retrieving updated content for {test_topic_id}:")
     #     updated_content = get_topic_content(test_topic_id)
-    #     print(updated_content)
+    #     logger.info(updated_content)
     #
-    #     print(f"\n[Test] Updating title for {test_topic_id}...")
+    #     logger.info(f"\n[Test] Updating title for {test_topic_id}...")
     #     update_topic_title(test_topic_id, "Test Topic - Title Updated")
     #
     #     # Verify title update by trying to fetch it (though we don't have a get_topic_details yet)
-    #     # For now, we'd check the DB directly or assume it worked based on print output.
+    #     # For now, we'd check the DB directly or assume it worked based on logger.info output.
     #
-    #     print(f"\n[Test] Attempting to get content for a non-existent topic:")
+    #     logger.info(f"\n[Test] Attempting to get content for a non-existent topic:")
     #     get_topic_content("non-existent-uuid")
     #
-    #     print(f"\n[Test] Attempting to save content for a non-existent topic:")
+    #     logger.info(f"\n[Test] Attempting to save content for a non-existent topic:")
     #     save_topic_content("non-existent-uuid", "some content")
     #
-    #     print(f"\n[Test] Attempting to update title for a non-existent topic:")
+    #     logger.info(f"\n[Test] Attempting to update title for a non-existent topic:")
     #     update_topic_title("non-existent-uuid", "some title")
     #
-    #     print(f"\n[Test] Attempting to update title with empty string:")
+    #     logger.info(f"\n[Test] Attempting to update title with empty string:")
     #     update_topic_title(test_topic_id, "  ")
     #
     # # --- Tests for hierarchy and extractions ---
-    # print("\n--- Testing Hierarchy and Extractions ---")
+    # logger.info("\n--- Testing Hierarchy and Extractions ---")
     # # Create a small hierarchy for testing
     # root_id = create_topic("Root for hierarchy test", custom_title="Hierarchy Root")
     # child1_id = None
@@ -383,30 +391,30 @@ if __name__ == '__main__':
     #     if grandchild1_id:
     #         extraction_id = create_extraction(parent_topic_id=child1_id, child_topic_id=grandchild1_id, start_char=25, end_char=44) # "extractable content" (end_char is inclusive for storage)
     #         if extraction_id:
-    #             print(f"Created extraction record: {extraction_id}")
+    #             logger.info(f"Created extraction record: {extraction_id}")
     #
-    # print("\n[Test] Full Topic Hierarchy:")
+    # logger.info("\n[Test] Full Topic Hierarchy:")
     # hierarchy = get_topic_hierarchy()
     # if hierarchy:
     #     for topic in hierarchy:
-    #         print(f"  ID: {topic['id']}, Title: {topic['title']}, Parent: {topic['parent_id']}")
+    #         logger.info(f"  ID: {topic['id']}, Title: {topic['title']}, Parent: {topic['parent_id']}")
     # else:
-    #     print("  No hierarchy data returned.")
+    #     logger.info("  No hierarchy data returned.")
     #
     # if child1_id:
-    #     print(f"\n[Test] Extractions for Parent ID {child1_id} (Child 1):")
+    #     logger.info(f"\n[Test] Extractions for Parent ID {child1_id} (Child 1):")
     #     extractions = get_extractions_for_parent(child1_id)
     #     if extractions:
     #         for extr in extractions:
-    #             print(f"  Extraction ID: {extr['id']}, Child Topic: {extr['child_topic_id']}, Start: {extr['parent_text_start_char']}, End: {extr['parent_text_end_char']}")
+    #             logger.info(f"  Extraction ID: {extr['id']}, Child Topic: {extr['child_topic_id']}, Start: {extr['parent_text_start_char']}, End: {extr['parent_text_end_char']}")
     #     else:
-    #         print(f"  No extractions found for {child1_id}.")
+    #         logger.info(f"  No extractions found for {child1_id}.")
     #
-    # print("\n[Test] Attempting to create extraction with non-existent parent:")
+    # logger.info("\n[Test] Attempting to create extraction with non-existent parent:")
     # create_extraction("non-existent-parent", child1_id if child1_id else "dummy_child", 0, 10)
     #
-    # print("\n[Test] Attempting to create extraction with non-existent child:")
+    # logger.info("\n[Test] Attempting to create extraction with non-existent child:")
     # create_extraction(root_id if root_id else "dummy_parent", "non-existent-child", 0, 10)
     #
-    # print("\n--- Manual tests finished ---")
+    # logger.info("\n--- Manual tests finished ---")
     pass # Keep the if __name__ block, but no active test code by default.

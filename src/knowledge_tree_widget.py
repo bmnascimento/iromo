@@ -2,6 +2,9 @@ from PyQt6.QtWidgets import QTreeView, QAbstractItemView
 from PyQt6.QtGui import QStandardItemModel, QStandardItem, QFont
 from PyQt6.QtCore import Qt, pyqtSignal
 import data_manager as dm
+import logging
+
+logger = logging.getLogger(__name__)
 
 class KnowledgeTreeWidget(QTreeView):
     # Signal emitted when a topic is selected in the tree
@@ -67,7 +70,7 @@ class KnowledgeTreeWidget(QTreeView):
                 # This check is redundant if children_map is built correctly, but good for safety
                 pass # Children are added below based on children_map
             else: # Orphaned item (should ideally not happen with FK constraints)
-                print(f"Warning: Topic {topic_d['id']} has parent_id {parent_id} but parent not found. Adding as root.")
+                logger.warning(f"Topic {topic_d['id']} has parent_id {parent_id} but parent not found. Adding as root.")
                 root_items.append(item)
         
         # Add children to their respective parents using children_map
@@ -95,7 +98,7 @@ class KnowledgeTreeWidget(QTreeView):
         if topic_id and new_title:
             # Here we could also check if the title actually changed from its original db value
             # For now, we assume any 'itemChanged' on an editable item with UserRole data is a title change.
-            print(f"Tree item changed: ID {topic_id}, New Text: '{new_title}'")
+            logger.info(f"Tree item changed: ID {topic_id}, New Text: '{new_title}'")
             self.topic_title_changed.emit(topic_id, new_title)
             # dm.update_topic_title(topic_id, new_title) # Direct call or via signal to AppLogic
 
@@ -107,7 +110,7 @@ class KnowledgeTreeWidget(QTreeView):
             if selected_item:
                 topic_id = selected_item.data(Qt.ItemDataRole.UserRole)
                 if topic_id:
-                    print(f"Tree selection changed: Topic ID {topic_id}")
+                    logger.debug(f"Tree selection changed: Topic ID {topic_id}")
                     self.topic_selected.emit(topic_id)
 
     def add_topic_item(self, title, topic_id, parent_id=None):
@@ -148,7 +151,7 @@ class KnowledgeTreeWidget(QTreeView):
             except TypeError: # Already connected (should not happen if disconnect worked)
                 pass
         else:
-            print(f"Warning: Tried to update title for non-existent item in tree: {topic_id}")
+            logger.warning(f"Tried to update title for non-existent item in tree: {topic_id}")
 
     def get_selected_topic_id(self):
         """Returns the topic_id of the currently selected item, or None."""
@@ -174,7 +177,7 @@ if __name__ == '__main__':
                 {'id': 'root2', 'title': 'Root Topic 2 (Empty)', 'parent_id': None},
             ]
         def update_topic_title(self, topic_id, new_title):
-            print(f"[DummyDM] Update title for {topic_id} to '{new_title}'")
+            logger.info(f"[DummyDM] Update title for {topic_id} to '{new_title}'")
             return True
 
     dm_actual = dm # Save actual dm
@@ -204,14 +207,14 @@ if __name__ == '__main__':
                 new_id_child = f"new_child_{parent_item.rowCount()}_of_{selected_id}"
                 tree_widget.add_topic_item(f"New Child {parent_item.rowCount()}", new_id_child, parent_id=selected_id)
         else:
-            print("No parent selected to add child to.")
+            logger.warning("No parent selected to add child to.")
             
     def test_update_selected_title():
         selected_id = tree_widget.get_selected_topic_id()
         if selected_id:
             tree_widget.update_topic_item_title(selected_id, "TITLE UPDATED EXTERNALLY")
         else:
-            print("No item selected to update title.")
+            logger.warning("No item selected to update title.")
 
 
     btn_add_root = QPushButton("Add Root Topic")
