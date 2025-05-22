@@ -1,38 +1,207 @@
 import logging
 import os # For __main__ test
 import shutil # For __main__ test cleanup
+import datetime # For __main__ test
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QUrl
 from PyQt6.QtGui import (
+    QAction,
     QColor,
     QFont,
-    QSyntaxHighlighter,
+    QKeySequence,
+    QDesktopServices,
+    QTextBlockFormat,
     QTextCharFormat,
     QTextCursor,
 )
-from PyQt6.QtWidgets import QApplication, QTextEdit
+from PyQt6.QtWidgets import QApplication, QTextEdit, QToolBar, QVBoxLayout, QWidget
 
 from .data_manager import DataManager # Import the DataManager class
 
 logger = logging.getLogger(__name__)
 
-class TopicEditorWidget(QTextEdit):
+class TopicEditorWidget(QWidget): # Changed from QTextEdit to QWidget
     content_changed_externally = pyqtSignal() # Emitted if content is changed by an external action (e.g. undo/redo of save)
     dirty_changed = pyqtSignal(bool) # Emitted when the dirty state changes
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_topic_id = None
+        self.data_manager = None # Store DataManager instance
         self.original_content = "" # Stores the content as it was when loaded or last saved
         self._is_dirty = False      # True if content has changed since last load/save
-        self.setFont(QFont("Arial", 12))
-        self.setAcceptRichText(True)
-        self.setPlaceholderText("No collection open or no topic selected.")
-        self.textChanged.connect(self._handle_text_changed)
+
+        self._setup_ui()
+        self._connect_signals()
+
+    def _setup_ui(self):
+        """Sets up the UI elements for the widget."""
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0) # Remove margins for toolbar
+        layout.setSpacing(0) # Remove spacing between toolbar and editor
+
+        # Toolbar
+        self.toolbar = QToolBar(self)
+        layout.addWidget(self.toolbar)
+
+        # --- Formatting Actions ---
+        # Bold
+        self.action_bold = QAction("Bold", self)
+        self.action_bold.setCheckable(True)
+        self.action_bold.setShortcut(QKeySequence.StandardKey.Bold)
+        self.action_bold.triggered.connect(self._toggle_bold)
+        self.toolbar.addAction(self.action_bold)
+
+        # Italic
+        self.action_italic = QAction("Italic", self)
+        self.action_italic.setCheckable(True)
+        self.action_italic.setShortcut(QKeySequence.StandardKey.Italic)
+        self.action_italic.triggered.connect(self._toggle_italic)
+        self.toolbar.addAction(self.action_italic)
+
+        # Underline
+        self.action_underline = QAction("Underline", self)
+        self.action_underline.setCheckable(True)
+        self.action_underline.setShortcut(QKeySequence.StandardKey.Underline)
+        self.action_underline.triggered.connect(self._toggle_underline)
+        self.toolbar.addAction(self.action_underline)
+
+        self.toolbar.addSeparator()
+
+        # Paragraph
+        self.action_paragraph = QAction("P", self)
+        self.action_paragraph.triggered.connect(self._set_block_style_paragraph)
+        self.toolbar.addAction(self.action_paragraph)
+
+        # Heading 1
+        self.action_h1 = QAction("H1", self)
+        self.action_h1.triggered.connect(lambda: self._set_block_style_heading(1))
+        self.toolbar.addAction(self.action_h1)
+
+        # Heading 2
+        self.action_h2 = QAction("H2", self)
+        self.action_h2.triggered.connect(lambda: self._set_block_style_heading(2))
+        self.toolbar.addAction(self.action_h2)
+        
+        # Heading 3 (Optional, as per spec)
+        self.action_h3 = QAction("H3", self)
+        self.action_h3.triggered.connect(lambda: self._set_block_style_heading(3))
+        self.toolbar.addAction(self.action_h3)
+
+
+        self.toolbar.addSeparator()
+
+        # Open File Action
+        self.action_open_file = QAction("Open HTML File", self)
+        self.action_open_file.triggered.connect(self._open_current_topic_file)
+        self.action_open_file.setEnabled(False) # Disabled by default
+        self.toolbar.addAction(self.action_open_file)
+
+        # Text Editor
+        self.editor = QTextEdit(self)
+        self.editor.setFont(QFont("Arial", 12))
+        self.editor.setAcceptRichText(True)
+        self.editor.setPlaceholderText("No collection open or no topic selected.")
+        layout.addWidget(self.editor)
+
+        self.setLayout(layout)
+
+    def _connect_signals(self):
+        """Connects signals for the editor."""
+        self.editor.textChanged.connect(self._handle_text_changed)
+        self.editor.currentCharFormatChanged.connect(self._update_format_actions)
+        self.editor.cursorPositionChanged.connect(self._update_format_actions)
+
+    # --- Formatting Action Handlers ---
+    def _toggle_bold(self):
+        fmt = QTextCharFormat()
+        fmt.setFontWeight(QFont.Weight.Bold if self.action_bold.isChecked() else QFont.Weight.Normal)
+        self._merge_char_format(fmt)
+
+    def _toggle_italic(self):
+        fmt = QTextCharFormat()
+        fmt.setFontItalic(self.action_italic.isChecked())
+        self._merge_char_format(fmt)
+
+    def _toggle_underline(self):
+        fmt = QTextCharFormat()
+        fmt.setFontUnderline(self.action_underline.isChecked())
+        self._merge_char_format(fmt)
+
+    def _merge_char_format(self, fmt: QTextCharFormat):
+        cursor = self.editor.textCursor()
+        if not cursor.hasSelection():
+            cursor.select(QTextCursor.SelectionType.WordUnderCursor)
+        cursor.mergeCharFormat(fmt)
+        self.editor.mergeCurrentCharFormat(fmt) # Ensures typing new text also gets the format
+
+    def _set_block_style_paragraph(self):
+        self._set_block_style_heading(0) # Heading level 0 is a normal paragraph
+
+    def _set_block_style_heading(self, level: int):
+        cursor = self.editor.textCursor()
+        block_fmt = QTextBlockFormat()
+        if level > 0:
+            block_fmt.setHeadingLevel(level)
+        # For level 0 (paragraph), a default QTextBlockFormat is fine,
+        # or ensure any existing heading level is removed.
+        # QTextBlockFormat() by default is a paragraph.
+        # To be explicit for removing heading:
+        # if level == 0:
+        #     block_fmt.setProperty(QTextBlockFormat.Property.HeadingLevel, 0) # or some other way to clear it
+        
+        cursor.mergeBlockFormat(block_fmt)
+        self.editor.setFocus() # Return focus to editor
+
+    def _update_format_actions(self):
+        """Updates the state of formatting actions based on the current cursor or selection."""
+        char_format = self.editor.currentCharFormat()
+        block_format = self.editor.textCursor().blockFormat()
+
+        self.action_bold.setChecked(char_format.fontWeight() == QFont.Weight.Bold)
+        self.action_italic.setChecked(char_format.fontItalic())
+        self.action_underline.setChecked(char_format.fontUnderline())
+
+        # Update heading/paragraph state (more complex, might need a QComboBox or radio buttons for exclusive selection)
+    def _open_current_topic_file(self):
+        """Opens the HTML file of the current topic in the system's default application."""
+        if not self.current_topic_id or not self.data_manager:
+            logger.warning("Open file called but no topic/data_manager loaded.")
+            return
+
+        topic_details = self.data_manager.get_topic_details(self.current_topic_id)
+        if not topic_details or 'text_file_uuid' not in topic_details:
+            logger.error(f"Could not retrieve details or text_file_uuid for topic {self.current_topic_id}.")
+            return
+
+        # We need to use the _get_topic_text_file_path method from DataManager.
+        # Since it's a protected member, it's better if DataManager exposes a public method
+        # to get the full path directly, or we reconstruct it here if the pattern is stable.
+        # For now, let's assume DataManager needs a public method or we call the protected one.
+        # To avoid modifying DataManager further in this step, we'll call the protected one.
+        # A better long-term solution would be a public `get_topic_file_path(topic_id)` in DataManager.
+        file_path = self.data_manager._get_topic_text_file_path(topic_details['text_file_uuid'])
+
+        if not os.path.exists(file_path):
+            logger.error(f"Topic file does not exist at path: {file_path}")
+            # Optionally, inform the user via a QMessageBox
+            return
+
+        url = QUrl.fromLocalFile(file_path)
+        if not QDesktopServices.openUrl(url):
+            logger.error(f"Could not open file: {file_path}")
+            # Optionally, inform the user
+        # For now, we don't have a visual indicator for H1/H2/P on the buttons themselves.
+        # If we made them checkable, we'd need to uncheck others.
+        # heading_level = block_format.headingLevel()
+        # self.action_paragraph.setChecked(heading_level == 0)
+        # self.action_h1.setChecked(heading_level == 1)
+        # self.action_h2.setChecked(heading_level == 2)
+        # self.action_h3.setChecked(heading_level == 3)
 
 
     def _get_document_text_for_logging(self):
-        doc = self.document()
+        doc = self.editor.document()
         text = doc.toPlainText()
         return text.replace('\n', '\\n')[:100]
 
@@ -43,32 +212,37 @@ class TopicEditorWidget(QTextEdit):
 
         if not data_manager_instance:
             logger.warning("load_topic_content called with no DataManager instance.")
-            self.setPlaceholderText(f"Error: Data manager not available for topic {topic_id}.")
+            self.editor.setPlaceholderText(f"Error: Data manager not available for topic {topic_id}.")
+            self.action_open_file.setEnabled(False)
             return
 
-        content = data_manager_instance.get_topic_content(topic_id)
+        self.data_manager = data_manager_instance # Store DataManager
+        content = self.data_manager.get_topic_content(topic_id)
         if content is not None:
             self.current_topic_id = topic_id
             self.original_content = content # Store original content
-            self.setPlainText(content)
+            self.editor.setHtml(content) # Render content as HTML
             self.mark_as_clean() # Sets _is_dirty to False and emits signal
-            logger.debug(f"After setPlainText for {topic_id}. Doc text: '{self._get_document_text_for_logging()}'")
+            self.action_open_file.setEnabled(True) # Enable button
+            logger.debug(f"After setHtml for {topic_id}. Doc text: '{self._get_document_text_for_logging()}'")
 
-            cursor = self.textCursor()
+            cursor = self.editor.textCursor()
             cursor.select(QTextCursor.SelectionType.Document)
             default_format = QTextCharFormat()
+            # default_format.setFont(self.editor.font()) # Ensure it uses the editor's default font
             cursor.setCharFormat(default_format)
             cursor.clearSelection()
-            self.setTextCursor(cursor)
+            self.editor.setTextCursor(cursor)
             logger.debug(f"Applied default char format to entire document for topic {topic_id}.")
 
-            self._apply_existing_highlights(data_manager_instance)
+            self._apply_existing_highlights(self.data_manager)
         else:
             self.current_topic_id = None # Ensure this is reset
-            self.setPlaceholderText(f"Could not load content for topic {topic_id}.")
+            self.editor.setPlaceholderText(f"Could not load content for topic {topic_id}.")
             logger.warning(f"Content for topic_id {topic_id} was None.")
             self.original_content = ""
             self.mark_as_clean()
+            self.action_open_file.setEnabled(False) # Disable button
 
     def _apply_existing_highlights(self, data_manager_instance: DataManager):
         """Applies highlights for all extractions using the provided DataManager."""
@@ -86,10 +260,10 @@ class TopicEditorWidget(QTextEdit):
             self.apply_extraction_highlight(start_char, end_char)
 
     def get_current_content(self):
-        return self.toPlainText()
+        return self.editor.toHtml() # Return HTML content
 
     def get_selected_text_and_offsets(self):
-        cursor = self.textCursor()
+        cursor = self.editor.textCursor()
         if not cursor.hasSelection():
             return None, -1, -1
         
@@ -97,18 +271,18 @@ class TopicEditorWidget(QTextEdit):
         start_offset = cursor.selectionStart()
         end_offset = cursor.selectionEnd()
         
-        return selected_text, start_offset, end_offset - 1
+        return selected_text, start_offset, end_offset - 1 # end_offset is exclusive, so -1 for inclusive
 
     def apply_extraction_highlight(self, start_char, end_char, color=QColor("lightblue")):
         doc_text_before_highlight = self._get_document_text_for_logging()
-        doc_len = len(self.toPlainText())
+        doc_len = len(self.editor.toPlainText()) # Use self.editor
         logger.debug(f"apply_extraction_highlight: START. For topic {self.current_topic_id}. Input start={start_char}, end={end_char}. Doc len: {doc_len}. Doc text: '{doc_text_before_highlight}'")
 
         if start_char is None or end_char is None or start_char < 0 or end_char < start_char or end_char >= doc_len :
             logger.warning(f"apply_extraction_highlight: Invalid range: start={start_char}, end={end_char}, doc_len={doc_len}. Skipping highlight.")
             return
 
-        cursor = self.textCursor()
+        cursor = self.editor.textCursor() # Use self.editor
         cursor.setPosition(start_char)
         selection_end_pos = end_char + 1
         
@@ -125,7 +299,9 @@ class TopicEditorWidget(QTextEdit):
         logger.debug(f"apply_extraction_highlight: Cursor set. Selection: start={cursor.selectionStart()}, end={cursor.selectionEnd()}, text='{selected_text_for_log}...'")
 
         if not (cursor.selectionStart() == start_char and cursor.selectionEnd() == selection_end_pos):
-            logger.critical(f"apply_extraction_highlight: Selection mismatch! Expected sel_start={start_char}, sel_end={selection_end_pos}. Got actual_sel_start={cursor.selectionStart()}, actual_sel_end={cursor.selectionEnd()}. This indicates a serious issue in cursor positioning.")
+            # This check might be too strict if HTML content vs plain text indexing differs slightly.
+            # For now, keeping it for debugging.
+            logger.warning(f"apply_extraction_highlight: Selection mismatch! Expected sel_start={start_char}, sel_end={selection_end_pos}. Got actual_sel_start={cursor.selectionStart()}, actual_sel_end={cursor.selectionEnd()}. This might be due to HTML vs PlainText offset differences.")
 
         char_format = QTextCharFormat()
         char_format.setBackground(color)
@@ -135,22 +311,26 @@ class TopicEditorWidget(QTextEdit):
         final_cursor_pos = cursor.selectionEnd()
         cursor.clearSelection()
         cursor.setPosition(final_cursor_pos)
-        self.setTextCursor(cursor)
+        self.editor.setTextCursor(cursor) # Use self.editor
 
     def clear_content(self):
         """Clears the editor, resets current_topic_id, and sets placeholder text."""
         self.current_topic_id = None
-        super().clear() 
-        self.setPlaceholderText("Select a topic to view or edit its content, or open a collection.")
+        self.editor.clear() # Use self.editor
+        self.editor.setPlaceholderText("Select a topic to view or edit its content, or open a collection.") # Use self.editor
         self.original_content = ""
         self.mark_as_clean()
+        self.action_open_file.setEnabled(False) # Disable button
+        self.data_manager = None # Clear stored DataManager
 
     def _handle_text_changed(self):
         """Sets the dirty flag if the current content differs from original_content."""
+        # Check if the editor is available, e.g. during __init__ it might not be fully set up
+        if not hasattr(self, 'editor') or self.editor is None:
+            return
+
         if not self._is_dirty: # Only change and emit if it wasn't already dirty
-            # More robust check: compare current text to original_content
-            # However, any textChanged signal implies a modification from the loaded state.
-            current_text = self.toPlainText()
+            current_text = self.editor.toHtml() # Use self.editor
             if current_text != self.original_content:
                 self._is_dirty = True
                 self.dirty_changed.emit(True)
@@ -165,7 +345,10 @@ class TopicEditorWidget(QTextEdit):
         Marks the current content as saved by updating the original_content baseline
         and resetting the dirty flag.
         """
-        self.original_content = self.toPlainText()
+        if not hasattr(self, 'editor') or self.editor is None: # Guard
+            self.original_content = ""
+        else:
+            self.original_content = self.editor.toHtml() # Use self.editor
         self.mark_as_clean()
         logger.debug(f"TopicEditorWidget for {self.current_topic_id} marked as saved (clean).")
 
@@ -227,7 +410,7 @@ if __name__ == '__main__':
                     with open(text_file_path, 'w', encoding='utf-8') as f:
                         f.write(content)
                     cursor.execute("INSERT INTO topics (id, title, text_file_uuid, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-                                   (topic_id, f"Title for {topic_id}", text_uuid, dt.datetime.now(), dt.datetime.now()))
+                                   (topic_id, f"Title for {topic_id}", text_uuid, datetime.datetime.now(), datetime.datetime.now()))
                 
                 for parent_id, extr_list in self.extractions_data.items():
                     for extr in extr_list:

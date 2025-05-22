@@ -166,7 +166,7 @@ class DataManager(QObject):
 
         topic_id = str(uuid.uuid4())
         text_file_uuid_str = str(uuid.uuid4())
-        text_file_path = os.path.join(self.text_files_dir, f"{text_file_uuid_str}.txt")
+        text_file_path = os.path.join(self.text_files_dir, f"{text_file_uuid_str}.html")
         
         now = dt.datetime.now()
         title = custom_title if custom_title else self._generate_initial_title(text_content)
@@ -204,7 +204,7 @@ class DataManager(QObject):
 
     def _get_topic_text_file_path(self, text_file_uuid):
         """Constructs the full path to a topic's text file within the collection."""
-        return os.path.join(self.text_files_dir, f"{text_file_uuid}.txt")
+        return os.path.join(self.text_files_dir, f"{text_file_uuid}.html")
 
     def get_topic_content(self, topic_id):
         """
