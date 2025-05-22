@@ -1,20 +1,33 @@
-import sys
-import os
 import json
 import logging
-from PyQt6.QtWidgets import (QMainWindow, QApplication, QToolBar, QLabel,
-                             QSplitter, QVBoxLayout, QWidget, QFileDialog, QMessageBox)
+import os
+import sys
+
+from PyQt6.QtCore import QSettings, Qt
 from PyQt6.QtGui import QAction, QKeySequence
-from PyQt6.QtCore import Qt, QSettings
+from PyQt6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QSplitter,
+    QToolBar,
+    QVBoxLayout,
+    QWidget,
+)
 
-from .knowledge_tree_widget import KnowledgeTreeWidget
-from .topic_editor_widget import TopicEditorWidget
-from .data_manager import DataManager, DB_FILENAME, TEXT_FILES_SUBDIR # Import DataManager class
-from .undo_manager import UndoManager
-from src.commands.topic_commands import (CreateTopicCommand, SaveTopicContentCommand,
-                                        ExtractTextCommand, ChangeTopicTitleCommand)
+from commands.topic_commands import (
+    ChangeTopicTitleCommand,
+    CreateTopicCommand,
+    ExtractTextCommand,
+    SaveTopicContentCommand,
+)
+from data_manager import DB_FILENAME, TEXT_FILES_SUBDIR, DataManager
+from knowledge_tree_widget import KnowledgeTreeWidget
+from topic_editor_widget import TopicEditorWidget
+from undo_manager import UndoManager
 # Import MoveTopicCommand when tree reordering is implemented
-
 logger = logging.getLogger(__name__)
 APP_ORGANIZATION_NAME = "IromoOrg" # For QSettings
 APP_NAME = "Iromo" # For QSettings

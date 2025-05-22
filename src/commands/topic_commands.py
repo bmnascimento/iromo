@@ -1,6 +1,7 @@
 import logging
+
+from ..data_manager import DataManager
 from .base_command import BaseCommand
-from src.data_manager import DataManager
 # Forward declare Qt widgets for type hinting if not importing directly
 # to avoid circular dependencies or heavy imports in command files.
 # from PyQt6.QtWidgets import QWidget # Example if needed

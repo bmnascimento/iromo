@@ -1,11 +1,18 @@
-from PyQt6.QtWidgets import QTextEdit, QApplication
-from PyQt6.QtGui import QTextCursor, QColor, QTextCharFormat, QSyntaxHighlighter, QFont
-from PyQt6.QtCore import Qt, pyqtSignal
 import logging
 import os # For __main__ test
 import shutil # For __main__ test cleanup
 
-from .data_manager import DataManager # Import the DataManager class
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import (
+    QColor,
+    QFont,
+    QSyntaxHighlighter,
+    QTextCharFormat,
+    QTextCursor,
+)
+from PyQt6.QtWidgets import QApplication, QTextEdit
+
+from data_manager import DataManager # Import the DataManager class
 
 logger = logging.getLogger(__name__)
 
