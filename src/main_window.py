@@ -174,11 +174,32 @@ class MainWindow(QMainWindow):
     def _try_load_last_collection(self):
         settings = QSettings(APP_ORGANIZATION_NAME, APP_NAME)
         last_path = settings.value("last_opened_collection")
-        if last_path and os.path.isdir(last_path):
-            logger.info(f"Attempting to load last opened collection: {last_path}")
-            self._open_collection(last_path)
-        else:
-            logger.info("No last opened collection path found or path is invalid.")
+
+        if not last_path:
+            logger.info("No last opened collection path found in settings.")
+            return
+
+        if not os.path.isdir(last_path):
+            logger.warning(
+                f"Last opened collection path '{last_path}' is not a valid directory. "
+                "Clearing setting."
+            )
+            self._save_last_collection_path(None) # Clear invalid path
+            return
+
+        manifest_path = os.path.join(last_path, COLLECTION_MANIFEST_FILE)
+        if not os.path.exists(manifest_path):
+            logger.warning(
+                f"Last opened collection path '{last_path}' does not contain a manifest file "
+                f"'{COLLECTION_MANIFEST_FILE}'. Clearing setting."
+            )
+            self._save_last_collection_path(None) # Clear invalid path
+            return
+        
+        logger.info(f"Attempting to auto-load last opened collection: {last_path}")
+        self._open_collection(last_path)
+        # _open_collection handles its own errors, including logging and user messages.
+        # If it fails, data_manager will be None, and UI will reflect no collection open.
 
     def _handle_new_collection(self):
         dir_path = QFileDialog.getSaveFileName(
@@ -629,9 +650,29 @@ class MainWindow(QMainWindow):
                 return
             # If Discard, proceed to close
         
-        # Original close logic (now after dirty check)
+        # Store the path of the collection that was active when the app close sequence began.
+        collection_path_at_start_of_close = self.active_collection_path
+
+        # Perform standard operations for closing a collection, if one is managed.
+        # This includes saving unsaved changes, clearing UI elements.
+        # Importantly, _handle_close_collection calls _save_last_collection_path(None)
+        # as part of its routine for an explicit "close collection" action.
         if self.data_manager:
-             self._handle_close_collection() # This already clears undo_manager stacks
+            self._handle_close_collection()
+
+        # Now, determine the final "last_opened_collection" path to persist.
+        # If a collection was active when the application started to close,
+        # save its path. This overrides the None potentially set by _handle_close_collection.
+        if collection_path_at_start_of_close:
+            self._save_last_collection_path(collection_path_at_start_of_close)
+        else:
+            # If no collection was active at the start of closeEvent (e.g., it was
+            # manually closed earlier, or no collection was ever opened),
+            # ensure the "last_opened_collection" setting is cleared.
+            # _handle_close_collection would have done this if self.data_manager was true.
+            # This explicit call handles cases where _handle_close_collection might not run
+            # (e.g., no data_manager) or simply reinforces the desired state.
+            self._save_last_collection_path(None)
         super().closeEvent(event)
 
 
