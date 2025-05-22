@@ -9,11 +9,9 @@ from .base_command import BaseCommand
 logger = logging.getLogger(__name__)
 
 class CreateTopicCommand(BaseCommand):
-    def __init__(self, data_manager: DataManager, tree_widget, editor_widget, 
+    def __init__(self, data_manager: DataManager,
                  parent_id: str = None, custom_title: str = None, text_content: str = ""):
         self.data_manager = data_manager
-        self.tree_widget = tree_widget # For UI updates
-        self.editor_widget = editor_widget # For UI updates (e.g. selecting new topic)
         self.parent_id = parent_id
         self.custom_title = custom_title
         self.text_content = text_content
@@ -41,20 +39,7 @@ class CreateTopicCommand(BaseCommand):
 
         self._description = f"Create Topic '{actual_title}'"
         logger.info(f"Executing: {self.description}")
-        
-        # UI Update: Add to tree
-        if self.tree_widget and hasattr(self.tree_widget, 'add_topic_item'):
-            self.tree_widget.add_topic_item(
-                topic_id=self.new_topic_id, 
-                title=actual_title, 
-                parent_id=self.parent_id
-            )
-            # Optionally, select the new topic in the tree and editor
-            # self.tree_widget.select_topic(self.new_topic_id)
-            # self.editor_widget.load_topic_content(self.new_topic_id, self.data_manager)
-        else:
-            logger.warning("Tree widget not available or add_topic_item method missing for CreateTopicCommand UI update.")
-
+        # UI updates will be handled by listeners to DataManager.topic_created signal
 
     def undo(self):
         logger.info(f"Undoing: {self.description}")
@@ -63,12 +48,7 @@ class CreateTopicCommand(BaseCommand):
             if not deleted:
                 # Log error, but don't raise to allow undo stack processing to continue if possible
                 logger.error(f"Failed to delete topic {self.new_topic_id} during undo.")
-            
-            # UI Update: Remove from tree
-            if self.tree_widget and hasattr(self.tree_widget, 'remove_topic_item'):
-                self.tree_widget.remove_topic_item(self.new_topic_id)
-            else:
-                logger.warning("Tree widget not available or remove_topic_item method missing for CreateTopicCommand UI undo.")
+            # UI updates will be handled by listeners to DataManager.topic_deleted signal
         else:
             logger.warning("Cannot undo CreateTopicCommand: new_topic_id is not set.")
 
@@ -78,9 +58,8 @@ class CreateTopicCommand(BaseCommand):
 
 
 class ChangeTopicTitleCommand(BaseCommand):
-    def __init__(self, data_manager: DataManager, tree_widget, topic_id: str, old_title: str, new_title: str):
+    def __init__(self, data_manager: DataManager, topic_id: str, old_title: str, new_title: str):
         self.data_manager = data_manager
-        self.tree_widget = tree_widget # For UI updates
         self.topic_id = topic_id
         self.old_title = old_title
         self.new_title = new_title
@@ -91,26 +70,14 @@ class ChangeTopicTitleCommand(BaseCommand):
         success = self.data_manager.update_topic_title(self.topic_id, self.new_title)
         if not success:
             raise RuntimeError(f"DataManager failed to update title for topic {self.topic_id}")
-        
-        # UI Update
-        if self.tree_widget and hasattr(self.tree_widget, 'update_topic_item_title'):
-            self.tree_widget.update_topic_item_title(self.topic_id, self.new_title)
-        else:
-            logger.warning("Tree widget not available or update_topic_item_title method missing for UI update.")
-
+        # UI updates will be handled by listeners to DataManager.topic_title_changed signal
 
     def undo(self):
         logger.info(f"Undoing: {self.description}")
         success = self.data_manager.update_topic_title(self.topic_id, self.old_title)
         if not success:
             logger.error(f"DataManager failed to revert title for topic {self.topic_id} during undo.")
-
-        # UI Update
-        if self.tree_widget and hasattr(self.tree_widget, 'update_topic_item_title'):
-            self.tree_widget.update_topic_item_title(self.topic_id, self.old_title)
-        else:
-            logger.warning("Tree widget not available or update_topic_item_title method missing for UI undo.")
-
+        # UI updates will be handled by listeners to DataManager.topic_title_changed signal (when title reverts to old_title)
 
     @property
     def description(self) -> str:
@@ -147,11 +114,9 @@ class SaveTopicContentCommand(BaseCommand):
 
 
 class ExtractTextCommand(BaseCommand):
-    def __init__(self, data_manager: DataManager, tree_widget, editor_widget,
+    def __init__(self, data_manager: DataManager,
                  parent_topic_id: str, selected_text: str, start_char: int, end_char: int):
         self.data_manager = data_manager
-        self.tree_widget = tree_widget
-        self.editor_widget = editor_widget
         self.parent_topic_id = parent_topic_id
         self.selected_text = selected_text
         self.start_char = start_char
@@ -191,23 +156,8 @@ class ExtractTextCommand(BaseCommand):
             self.data_manager.delete_topic(self.child_topic_id) # Rollback child topic creation
             self.child_topic_id = None # Nullify to prevent issues in undo
             raise RuntimeError("Failed to create extraction link in DataManager.")
-
-        # UI Updates
-        if self.tree_widget and hasattr(self.tree_widget, 'add_topic_item'):
-            self.tree_widget.add_topic_item(
-                topic_id=self.child_topic_id,
-                title=self.child_topic_title,
-                parent_id=self.parent_topic_id
-            )
-        else:
-            logger.warning("Tree widget not available or add_topic_item method missing for ExtractTextCommand UI update.")
-
-        if self.editor_widget and hasattr(self.editor_widget, '_apply_existing_highlights'):
-            # Parent editor needs to re-apply highlights to show the new extraction
-            self.editor_widget._apply_existing_highlights(self.data_manager) 
-        else:
-            logger.warning("Editor widget not available or _apply_existing_highlights method missing for ExtractTextCommand UI update.")
-
+        # UI updates for new child topic and parent highlighting will be handled by listeners
+        # to DataManager.topic_created and DataManager.extraction_created signals.
 
     def undo(self):
         logger.info(f"Undoing: {self.description}")
@@ -221,19 +171,8 @@ class ExtractTextCommand(BaseCommand):
             deleted_topic = self.data_manager.delete_topic(self.child_topic_id)
             if not deleted_topic:
                 logger.error(f"Failed to delete child topic {self.child_topic_id} during undo.")
-            
-            # UI Update: Remove from tree
-            if self.tree_widget and hasattr(self.tree_widget, 'remove_topic_item'):
-                self.tree_widget.remove_topic_item(self.child_topic_id)
-            else:
-                logger.warning("Tree widget not available or remove_topic_item method missing for ExtractTextCommand UI undo.")
-
-        if self.editor_widget and hasattr(self.editor_widget, '_apply_existing_highlights'):
-            # Parent editor needs to re-apply highlights as the extraction is gone
-            self.editor_widget._apply_existing_highlights(self.data_manager)
-        else:
-            logger.warning("Editor widget not available or _apply_existing_highlights method missing for ExtractTextCommand UI undo.")
-
+            # UI updates for removing child topic and parent highlighting will be handled by listeners
+            # to DataManager.topic_deleted and DataManager.extraction_deleted signals.
 
     @property
     def description(self) -> str:
@@ -241,12 +180,11 @@ class ExtractTextCommand(BaseCommand):
 
 
 class MoveTopicCommand(BaseCommand):
-    def __init__(self, data_manager: DataManager, tree_widget, 
-                 topic_id: str, 
+    def __init__(self, data_manager: DataManager,
+                 topic_id: str,
                  old_parent_id: str, old_display_order: int,
                  new_parent_id: str, new_display_order: int):
         self.data_manager = data_manager
-        self.tree_widget = tree_widget # For UI updates
         self.topic_id = topic_id
         self.old_parent_id = old_parent_id
         self.old_display_order = old_display_order
@@ -264,33 +202,14 @@ class MoveTopicCommand(BaseCommand):
         success = self.data_manager.move_topic(self.topic_id, self.new_parent_id, self.new_display_order)
         if not success:
             raise RuntimeError(f"DataManager failed to move topic {self.topic_id}")
-
-        # UI Update: Move item in tree
-        if self.tree_widget and hasattr(self.tree_widget, 'move_topic_item'):
-            self.tree_widget.move_topic_item(
-                topic_id=self.topic_id,
-                new_parent_id=self.new_parent_id,
-                new_display_order=self.new_display_order 
-                # Tree widget might need more info or handle reordering differently
-            )
-        else:
-            logger.warning("Tree widget not available or move_topic_item method missing for UI update.")
+        # UI updates will be handled by listeners to DataManager.topic_moved signal
 
     def undo(self):
         logger.info(f"Undoing: {self.description}, moving back to parent '{self.old_parent_id}' at order {self.old_display_order}")
         success = self.data_manager.move_topic(self.topic_id, self.old_parent_id, self.old_display_order)
         if not success:
             logger.error(f"DataManager failed to revert move for topic {self.topic_id} during undo.")
-
-        # UI Update: Move item back in tree
-        if self.tree_widget and hasattr(self.tree_widget, 'move_topic_item'):
-            self.tree_widget.move_topic_item(
-                topic_id=self.topic_id,
-                new_parent_id=self.old_parent_id,
-                new_display_order=self.old_display_order
-            )
-        else:
-            logger.warning("Tree widget not available or move_topic_item method missing for UI undo.")
+        # UI updates will be handled by listeners to DataManager.topic_moved signal (when reverting)
 
     @property
     def description(self) -> str:

@@ -4,6 +4,7 @@ import os
 import datetime as dt
 import glob
 import logging
+from PyQt6.QtCore import QObject, pyqtSignal
 
 # Get a logger for this module
 logger = logging.getLogger(__name__)
@@ -28,7 +29,19 @@ sqlite3.register_adapter(dt.datetime, adapt_datetime_iso)
 sqlite3.register_converter("timestamp", convert_timestamp_iso)
 # --- End SQLite datetime handling ---
 
-class DataManager:
+class DataManager(QObject):
+    # Signals for data changes
+    topic_created = pyqtSignal(str, str, str, str) # topic_id, parent_id, title, text_content
+    topic_title_changed = pyqtSignal(str, str) # topic_id, new_title
+    topic_content_saved = pyqtSignal(str) # topic_id
+    topic_deleted = pyqtSignal(str, str) # deleted_topic_id, old_parent_id
+    extraction_created = pyqtSignal(str, str, str, int, int) # extraction_id, parent_topic_id, child_topic_id, start_char, end_char
+    extraction_deleted = pyqtSignal(str, str) # extraction_id, parent_topic_id
+    topic_moved = pyqtSignal(str, str, str, int) # topic_id, new_parent_id, old_parent_id, new_display_order
+    # Signal to indicate a full refresh might be needed, e.g., after migrations or complex ops
+    data_changed_bulk = pyqtSignal()
+
+
     def __init__(self, collection_base_path: str):
         """
         Initializes the DataManager for a specific collection.
@@ -36,6 +49,7 @@ class DataManager:
         Args:
             collection_base_path: The absolute path to the root of the collection folder.
         """
+        super().__init__() # Initialize QObject
         if not os.path.isdir(collection_base_path):
             # This case should ideally be handled before instantiating DataManager,
             # e.g., when creating a new collection or trying to open one.
@@ -126,6 +140,7 @@ class DataManager:
         try:
             self._apply_migrations(conn)
             logger.info(f"Collection database '{self.db_path}' initialization and migration check complete.")
+            self.data_changed_bulk.emit() # Emit after migrations
         except Exception as e:
             logger.error(f"Collection database initialization failed for {self.db_path}: {e}")
             raise # Re-raise to signal failure
@@ -172,6 +187,7 @@ class DataManager:
             
             conn.commit()
             logger.info(f"Topic '{title}' (ID: {topic_id}) created successfully in collection {self.collection_base_path}.")
+            self.topic_created.emit(topic_id, parent_id, title, text_content)
             return topic_id
         except Exception as e:
             conn.rollback()
@@ -247,6 +263,7 @@ class DataManager:
             cursor.execute("UPDATE topics SET updated_at = ? WHERE id = ?", (now, topic_id))
             conn.commit()
             logger.info(f"Content for topic '{topic_id}' in collection {self.collection_base_path} saved successfully.")
+            self.topic_content_saved.emit(topic_id)
             return True
         except Exception as e:
             conn.rollback()
@@ -276,6 +293,7 @@ class DataManager:
                 return False
             conn.commit()
             logger.info(f"Title for topic '{topic_id}' in {self.collection_base_path} updated to '{new_title}'.")
+            self.topic_title_changed.emit(topic_id, new_title)
             return True
         except Exception as e:
             conn.rollback()
@@ -352,6 +370,7 @@ class DataManager:
 
             conn.commit()
             logger.info(f"Extraction from '{parent_topic_id}' to '{child_topic_id}' (ID: {extraction_id}) created successfully in {self.collection_base_path}.")
+            self.extraction_created.emit(extraction_id, parent_topic_id, child_topic_id, start_char, end_char)
             return extraction_id
         except sqlite3.IntegrityError as e:
             conn.rollback()
@@ -403,14 +422,15 @@ class DataManager:
                 logger.error(f"Cannot delete topic {topic_id}: it has {child_count} child topic(s).")
                 return False
 
-            # Get text_file_uuid to delete the file
-            cursor.execute("SELECT text_file_uuid FROM topics WHERE id = ?", (topic_id,))
+            # Get text_file_uuid and parent_id to delete the file and for the signal
+            cursor.execute("SELECT text_file_uuid, parent_id FROM topics WHERE id = ?", (topic_id,))
             row = cursor.fetchone()
             if not row:
                 logger.warning(f"Topic {topic_id} not found for deletion.")
                 return False # Topic doesn't exist
             
             text_file_uuid = row['text_file_uuid']
+            old_parent_id = row['parent_id'] # Capture for the signal
             text_file_path = self._get_topic_text_file_path(text_file_uuid)
 
             # Delete associated extractions (where this topic is parent or child)
@@ -437,6 +457,7 @@ class DataManager:
                     # Log error but consider deletion successful as DB part is done
             
             logger.info(f"Topic {topic_id} and associated data deleted successfully.")
+            self.topic_deleted.emit(topic_id, old_parent_id)
             return True
 
         except sqlite3.Error as e:
@@ -453,13 +474,22 @@ class DataManager:
         """
         conn = self._get_db_connection()
         cursor = conn.cursor()
+        parent_topic_id_for_signal = None
         try:
+            # Get parent_topic_id for the signal before deleting
+            cursor.execute("SELECT parent_topic_id FROM extractions WHERE id = ?", (extraction_id,))
+            row = cursor.fetchone()
+            if row:
+                parent_topic_id_for_signal = row['parent_topic_id']
+
             cursor.execute("DELETE FROM extractions WHERE id = ?", (extraction_id,))
             if cursor.rowcount == 0:
                 logger.warning(f"Extraction {extraction_id} not found for deletion.")
                 return False
             conn.commit()
             logger.info(f"Extraction {extraction_id} deleted successfully.")
+            if parent_topic_id_for_signal:
+                self.extraction_deleted.emit(extraction_id, parent_topic_id_for_signal)
             return True
         except sqlite3.Error as e:
             conn.rollback()
@@ -481,7 +511,18 @@ class DataManager:
         conn = self._get_db_connection()
         cursor = conn.cursor()
         now = dt.datetime.now()
+        old_parent_id = None
         try:
+            # Get old_parent_id for the signal
+            cursor.execute("SELECT parent_id FROM topics WHERE id = ?", (topic_id,))
+            row = cursor.fetchone()
+            if row:
+                old_parent_id = row['parent_id']
+            else: # Topic not found
+                logger.error(f"Topic with ID {topic_id} not found for move operation.")
+                return False
+
+
             # Ensure topic_id is not being moved under itself or one of its descendants (prevent cycles)
             # This is a more complex check, for now, we assume valid moves.
             # A full check would involve traversing up from new_parent_id to ensure topic_id is not an ancestor.
@@ -493,11 +534,13 @@ class DataManager:
             """, (new_parent_id, new_display_order, now, topic_id))
             
             if cursor.rowcount == 0:
-                logger.error(f"Topic with ID {topic_id} not found for move operation.")
+                # This case should ideally be caught by the select above, but as a safeguard
+                logger.error(f"Topic with ID {topic_id} not found for move operation (during update).")
                 return False
             
             conn.commit()
             logger.info(f"Topic {topic_id} moved to parent {new_parent_id} with display_order {new_display_order}.")
+            self.topic_moved.emit(topic_id, new_parent_id, old_parent_id, new_display_order)
             return True
         except sqlite3.Error as e:
             conn.rollback()
@@ -506,65 +549,65 @@ class DataManager:
         finally:
             conn.close()
 
-if __name__ == '__main__':
-    # This block is for illustrative purposes or direct testing of DataManager.
-    # In the actual application, DataManager will be instantiated by other modules.
+# if __name__ == '__main__':
+#     # This block is for illustrative purposes or direct testing of DataManager.
+#     # In the actual application, DataManager will be instantiated by other modules.
     
-    # Create a dummy collection path for testing
-    test_collection_dir = "temp_test_iromo_collection"
-    if not os.path.exists(test_collection_dir):
-        os.makedirs(test_collection_dir)
+#     # Create a dummy collection path for testing
+#     test_collection_dir = "temp_test_iromo_collection"
+#     if not os.path.exists(test_collection_dir):
+#         os.makedirs(test_collection_dir)
     
-    # Create a dummy migrations directory and a dummy migration file if they don't exist
-    # This is just to allow the test code to run without erroring on missing migrations.
-    # In a real scenario, migrations are part of the application.
-    if not os.path.exists(MIGRATIONS_DIR):
-        os.makedirs(MIGRATIONS_DIR)
-        logger.info(f"Created dummy migrations directory: {MIGRATIONS_DIR}")
+#     # Create a dummy migrations directory and a dummy migration file if they don't exist
+#     # This is just to allow the test code to run without erroring on missing migrations.
+#     # In a real scenario, migrations are part of the application.
+#     if not os.path.exists(MIGRATIONS_DIR):
+#         os.makedirs(MIGRATIONS_DIR)
+#         logger.info(f"Created dummy migrations directory: {MIGRATIONS_DIR}")
     
-    dummy_migration_file = os.path.join(MIGRATIONS_DIR, "000_dummy_test_migration.sql")
-    if not os.path.exists(dummy_migration_file):
-        with open(dummy_migration_file, "w") as f:
-            f.write("-- Dummy migration for testing DataManager directly")
-        logger.info(f"Created dummy migration file: {dummy_migration_file}")
+#     dummy_migration_file = os.path.join(MIGRATIONS_DIR, "000_dummy_test_migration.sql")
+#     if not os.path.exists(dummy_migration_file):
+#         with open(dummy_migration_file, "w") as f:
+#             f.write("-- Dummy migration for testing DataManager directly")
+#         logger.info(f"Created dummy migration file: {dummy_migration_file}")
 
 
-    logger.info(f"Attempting to initialize DataManager for test collection: {test_collection_dir}")
-    try:
-        dm = DataManager(collection_base_path=os.path.abspath(test_collection_dir))
-        logger.info(f"DataManager initialized. DB path: {dm.db_path}")
+#     logger.info(f"Attempting to initialize DataManager for test collection: {test_collection_dir}")
+#     try:
+#         dm = DataManager(collection_base_path=os.path.abspath(test_collection_dir))
+#         logger.info(f"DataManager initialized. DB path: {dm.db_path}")
         
-        logger.info("Attempting to initialize collection storage (DB and text files dir)...")
-        dm.initialize_collection_storage() # This will create DB and apply migrations
-        logger.info("Collection storage initialization complete.")
+#         logger.info("Attempting to initialize collection storage (DB and text files dir)...")
+#         dm.initialize_collection_storage() # This will create DB and apply migrations
+#         logger.info("Collection storage initialization complete.")
 
-        # Example usage (optional, for testing):
-        # logger.info("\n--- Running manual tests for DataManager methods ---")
-        # test_topic_id = dm.create_topic(text_content="Initial content for testing.", custom_title="Test Topic")
-        # if test_topic_id:
-        #     logger.info(f"Created test topic with ID: {test_topic_id}")
-        #     content = dm.get_topic_content(test_topic_id)
-        #     logger.info(f"Content of test topic: {content}")
-        #     dm.save_topic_content(test_topic_id, "Updated content for test topic.")
-        #     updated_content = dm.get_topic_content(test_topic_id)
-        #     logger.info(f"Updated content: {updated_content}")
-        #     dm.update_topic_title(test_topic_id, "Test Topic - Updated Title")
-        #     hierarchy = dm.get_topic_hierarchy()
-        #     logger.info(f"Topic hierarchy: {hierarchy}")
-        # else:
-        #     logger.error("Failed to create test topic.")
+#         # Example usage (optional, for testing):
+#         # logger.info("\n--- Running manual tests for DataManager methods ---")
+#         # test_topic_id = dm.create_topic(text_content="Initial content for testing.", custom_title="Test Topic")
+#         # if test_topic_id:
+#         #     logger.info(f"Created test topic with ID: {test_topic_id}")
+#         #     content = dm.get_topic_content(test_topic_id)
+#         #     logger.info(f"Content of test topic: {content}")
+#         #     dm.save_topic_content(test_topic_id, "Updated content for test topic.")
+#         #     updated_content = dm.get_topic_content(test_topic_id)
+#         #     logger.info(f"Updated content: {updated_content}")
+#         #     dm.update_topic_title(test_topic_id, "Test Topic - Updated Title")
+#         #     hierarchy = dm.get_topic_hierarchy()
+#         #     logger.info(f"Topic hierarchy: {hierarchy}")
+#         # else:
+#         #     logger.error("Failed to create test topic.")
 
-    except Exception as e:
-        logger.error(f"Error during DataManager direct test: {e}")
-    finally:
-        # Clean up the dummy collection directory after test
-        # import shutil
-        # if os.path.exists(test_collection_dir):
-        #     logger.info(f"Removing test collection directory: {test_collection_dir}")
-        #     shutil.rmtree(test_collection_dir)
-        # if os.path.exists(dummy_migration_file): # Clean up dummy migration
-        #     os.remove(dummy_migration_file)
-        # if os.path.exists(MIGRATIONS_DIR) and not os.listdir(MIGRATIONS_DIR): # Clean up dummy migrations dir if empty
-        #     os.rmdir(MIGRATIONS_DIR)
-        logger.info("--- DataManager direct test finished ---")
-        pass
+#     except Exception as e:
+#         logger.error(f"Error during DataManager direct test: {e}")
+#     finally:
+#         # Clean up the dummy collection directory after test
+#         # import shutil
+#         # if os.path.exists(test_collection_dir):
+#         #     logger.info(f"Removing test collection directory: {test_collection_dir}")
+#         #     shutil.rmtree(test_collection_dir)
+#         # if os.path.exists(dummy_migration_file): # Clean up dummy migration
+#         #     os.remove(dummy_migration_file)
+#         # if os.path.exists(MIGRATIONS_DIR) and not os.listdir(MIGRATIONS_DIR): # Clean up dummy migrations dir if empty
+#         #     os.rmdir(MIGRATIONS_DIR)
+#         logger.info("--- DataManager direct test finished ---")
+#         pass

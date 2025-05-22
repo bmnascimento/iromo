@@ -10,7 +10,8 @@ Iromo is an open-source, cross-platform incremental reading and spaced repetitio
 *   **Topic Editing:** Create new topics, paste text content, and edit topic titles.
 *   **Text Extraction:** Extract segments of text from a parent topic to create new, more focused child topics.
 *   **Highlighting of Extracted Text:** Visually identify extracted text within parent topics through highlighting.
-*   **Undo/Redo Functionality:** Support for undoing and redoing actions (details in `docs/feature_plans/undo_redo_commander_plan.md`).
+*   **Undo/Redo Functionality:** Support for undoing and redoing actions using the Command pattern.
+*   **Reactive UI Updates:** The UI updates reactively to data changes through Qt's signals and slots, with `DataManager` emitting signals on data modification.
 *   **Data Storage:**
     *   Topic content is stored in individual plain text files.
     *   Metadata, Knowledge Tree structure, and extraction information are managed in an SQLite database.

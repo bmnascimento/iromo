@@ -53,37 +53,44 @@ A hybrid approach is used:
 
 ## 4. Application Architecture
 
-The application follows a model-view-controller like pattern. With the introduction of collections, data management is now handled by a `DataManager` class, instantiated per active collection.
+The application follows a model-view-controller like pattern, utilizing Qt's signals and slots for communication between components. Data operations are encapsulated in Command objects, managed by an `UndoManager`. UI updates are primarily driven by signals emitted from the `DataManager` upon data changes.
 
 ```mermaid
 graph TD
-    User -->|Interacts with| MainWindowUI["MainWindow (UI Orchestrator, Manages Active Collection)"]
+    User -->|Interacts with| MainWindowUI["MainWindow (UI Orchestrator, Controller Logic)"]
     
-    MainWindowUI -->|Displays & Delegates to| KnowledgeTreeWidgetUI["KnowledgeTreeWidget (QTreeView)"]
-    MainWindowUI -->|Displays & Delegates to| TopicEditorWidgetUI["TopicEditorWidget (QTextEdit)"]
+    MainWindowUI -->|Owns & Displays| KnowledgeTreeWidgetUI["KnowledgeTreeWidget (View)"]
+    MainWindowUI -->|Owns & Displays| TopicEditorWidgetUI["TopicEditorWidget (View)"]
     
-    KnowledgeTreeWidgetUI -->|Emits Signals (Selection, Title Change)| MainWindowUI
-    TopicEditorWidgetUI -->|Provides Data (Selected Text, Content)| MainWindowUI
+    KnowledgeTreeWidgetUI -- Widget Signals (e.g., topic_selected) --> MainWindowUI
+    TopicEditorWidgetUI -- Widget Signals / Provides Data --> MainWindowUI
     
-    MainWindowUI -->|Handles User Actions & Events| AppLogic["Application Logic (in MainWindow methods)"]
+    MainWindowUI -->|Creates & Dispatches via| UndoManager
+    UndoManager -->|Executes/Undoes| CommandObjects["Command Objects"]
     
-    AppLogic -->|Uses| ActiveDM["Active DataManager Instance (per Collection)"]
+    CommandObjects -->|Data Operations| ActiveDM["Active DataManager (Model, QObject)"]
     
-    ActiveDM -->|Reads/Writes| CollectionSQLite["Collection's SQLite DB (e.g., MyCollection/iromo.sqlite)"]
-    ActiveDM -->|Reads/Writes| CollectionTextFiles["Collection's Text Files (e.g., MyCollection/text_files/)"]
+    ActiveDM -- Emits Data Change Signals --> MainWindowUI
+    
+    MainWindowUI -->|Updates UI based on DM Signals| KnowledgeTreeWidgetUI
+    MainWindowUI -->|Updates UI based on DM Signals| TopicEditorWidgetUI
+    
+    ActiveDM -->|Reads/Writes| CollectionSQLite["Collection's SQLite DB"]
+    ActiveDM -->|Reads/Writes| CollectionTextFiles["Collection's Text Files"]
 
-    subgraph UI_Layer [UI (PyQt6 - src/main_window.py, src/knowledge_tree_widget.py, src/topic_editor_widget.py)]
+    subgraph UI_Layer [UI & Controller (PyQt6 - src/main_window.py, src/widgets...)]
         MainWindowUI
         KnowledgeTreeWidgetUI
         TopicEditorWidgetUI
     end
 
-    subgraph Core_Logic_Layer [Core Logic & Data (Python - src/data_manager.py)]
-        AppLogic
-        ActiveDM
+    subgraph Command_Undo_Logic ["Command & Undo Logic (src/commands, src/undo_manager.py)"]
+        UndoManager
+        CommandObjects
     end
 
-    subgraph Data_Storage_Layer [Data Store (Per Collection; App-level: migrations/)]
+    subgraph Data_Layer [Data Model & Persistence (src/data_manager.py)]
+        ActiveDM
         CollectionSQLite
         CollectionTextFiles
     end
@@ -96,26 +103,32 @@ graph TD
 *   **[`src/main_window.py`](src/main_window.py) (`MainWindow` class):**
     *   Main application window, inherits `QMainWindow`.
     *   Orchestrates UI components (`KnowledgeTreeWidget`, `TopicEditorWidget`) using a `QSplitter`.
-    *   Sets up menus, toolbars, and connects signals from widgets to handler methods.
-    *   Handles core application logic like text extraction (`extract_text()`), saving content (`save_current_topic_content()`), and responding to topic selection/title changes.
-    *   Calls `data_manager.initialize_database()` on startup.
-    *   Includes `_create_test_data_if_needed()` for consistent debugging of highlighting.
-*   **[`src/data_manager.py`](src/data_manager.py)**:
-    *   Handles all interactions with the SQLite database and topic text files.
-    *   `initialize_database()`: Creates directories and applies database migrations.
-    *   `_apply_migrations()`: Applies SQL scripts from the `migrations/` directory.
-    *   `create_topic()`: Creates a new topic (DB record + text file), auto-generates initial title.
+    *   Sets up menus, toolbars, and connects signals from widgets and `DataManager` to handler methods.
+    *   Handles user actions by creating Command objects and dispatching them via the `UndoManager`.
+    *   Responds to `DataManager` signals to update UI components.
+    *   Manages the active collection and its associated `DataManager` instance.
+*   **[`src/data_manager.py`](src/data_manager.py) (`DataManager` class):**
+    *   Inherits from `QObject`.
+    *   Handles all interactions with the SQLite database and topic text files for a specific collection.
+    *   Emits Qt signals (e.g., `topic_created`, `topic_title_changed`, `extraction_created`) upon successful data modifications, allowing other components (like `MainWindow`) to react to these changes.
+    *   `initialize_collection_storage()`: Creates directories and applies database migrations.
+    *   `create_topic()`: Creates a new topic (DB record + text file), auto-generates initial title, emits `topic_created`.
     *   `get_topic_content()`: Retrieves text content for a topic.
     *   `save_topic_content()`: Saves text content for a topic, updates `updated_at`.
     *   `update_topic_title()`: Updates a topic's title.
     *   `get_topic_hierarchy()`: Fetches data to build the Knowledge Tree.
-    *   `create_extraction()`: Records an extraction event (links parent to new child topic, stores character offsets).
+    *   `create_extraction()`: Records an extraction event, emits `extraction_created`.
     *   `get_extractions_for_parent()`: Retrieves extraction records for highlighting.
     *   `_generate_initial_title()`: Helper to create default topic titles.
+*   **[`src/commands/`](src/commands/) ([`base_command.py`](src/commands/base_command.py), [`topic_commands.py`](src/commands/topic_commands.py)):**
+    *   Command objects encapsulate specific operations (e.g., `CreateTopicCommand`, `ExtractTextCommand`).
+    *   They interact with `DataManager` to perform data changes. They do *not* directly interact with UI widgets.
+*   **[`src/undo_manager.py`](src/undo_manager.py) (`UndoManager` class):**
+    *   Manages undo/redo stacks and executes commands.
 *   **[`src/knowledge_tree_widget.py`](src/knowledge_tree_widget.py) (`KnowledgeTreeWidget` class):**
     *   Custom widget inheriting `QTreeView`.
     *   Displays the topic hierarchy using `QStandardItemModel`.
-    *   Loads data via `data_manager.get_topic_hierarchy()`.
+    *   Its data is updated by `MainWindow` in response to `DataManager` signals or direct calls (e.g., on initial load).
     *   Allows inline editing of topic titles.
     *   Emits signals:
         *   `topic_selected(topic_id: str)`
@@ -140,10 +153,10 @@ graph TD
 3.  `MainWindow.extract_text()` is called:
     a.  Gets current parent topic ID and selected text/offsets from `TopicEditorWidget`.
     b.  Calls `MainWindow.save_current_topic_content()` to ensure parent content is up-to-date.
-    c.  Calls `data_manager.create_topic()` to create a new child topic with the extracted text.
-    d.  Calls `data_manager.create_extraction()` to link parent and child, storing offsets.
-    e.  Calls `KnowledgeTreeWidget.add_topic_item()` to display the new child topic in the tree.
-    f.  Calls `TopicEditorWidget._apply_existing_highlights()` to refresh highlights in the parent topic's view, now including the new extraction.
+    c.  `data_manager.create_topic()` is called (via `ExtractTextCommand`), which creates the child topic and emits a `topic_created` signal.
+    d.  `data_manager.create_extraction()` is called (via `ExtractTextCommand`), which links parent and child and emits an `extraction_created` signal.
+    e.  `MainWindow` receives the `topic_created` signal and updates `KnowledgeTreeWidget` to display the new child topic.
+    f.  `MainWindow` receives the `extraction_created` signal (or reacts to the child topic creation if the parent is active) and instructs `TopicEditorWidget` to refresh highlights in the parent topic's view.
 
 ## 6. Future Considerations (Beyond MVP)
 

@@ -250,20 +250,44 @@ class MainWindow(QMainWindow):
             self._handle_close_collection()
 
         try:
-            self.data_manager = DataManager(collection_path)
-            self.data_manager.initialize_collection_storage() # Creates DB, text_files dir, applies migrations
+            new_data_manager = DataManager(collection_path)
+            new_data_manager.initialize_collection_storage() # Creates DB, text_files dir, applies migrations
+            
+            self.data_manager = new_data_manager
             self.active_collection_path = collection_path
             
+            # Connect DataManager signals
+            self.data_manager.topic_created.connect(self._on_dm_topic_created)
+            self.data_manager.topic_title_changed.connect(self._on_dm_topic_title_changed)
+            self.data_manager.topic_content_saved.connect(self._on_dm_topic_content_saved)
+            self.data_manager.topic_deleted.connect(self._on_dm_topic_deleted)
+            self.data_manager.extraction_created.connect(self._on_dm_extraction_created)
+            self.data_manager.extraction_deleted.connect(self._on_dm_extraction_deleted)
+            self.data_manager.topic_moved.connect(self._on_dm_topic_moved)
+            self.data_manager.data_changed_bulk.connect(self._on_dm_data_changed_bulk)
+
             # Load data into UI
-            self.tree_widget.load_tree_data(self.data_manager) # Assumes method exists
-            self.editor_widget.clear_content() # Clear editor for new collection
+            self.tree_widget.load_tree_data(self.data_manager)
+            self.editor_widget.clear_content()
             self.undo_manager.clear_stacks()
 
             self._save_last_collection_path(collection_path)
             logger.info(f"Successfully opened collection: {collection_path}")
         except Exception as e:
-            logger.error(f"Failed to open or initialize collection at {collection_path}: {e}")
+            logger.error(f"Failed to open or initialize collection at {collection_path}: {e}", exc_info=True)
             QMessageBox.critical(self, "Error Opening Collection", f"Could not open or initialize collection: {collection_path}\n{e}")
+            if self.data_manager: # Disconnect if connection partially failed
+                try:
+                    self.data_manager.topic_created.disconnect(self._on_dm_topic_created)
+                    self.data_manager.topic_title_changed.disconnect(self._on_dm_topic_title_changed)
+                    self.data_manager.topic_content_saved.disconnect(self._on_dm_topic_content_saved)
+                    self.data_manager.topic_deleted.disconnect(self._on_dm_topic_deleted)
+                    self.data_manager.extraction_created.disconnect(self._on_dm_extraction_created)
+                    self.data_manager.extraction_deleted.disconnect(self._on_dm_extraction_deleted)
+                    self.data_manager.topic_moved.disconnect(self._on_dm_topic_moved)
+                    self.data_manager.data_changed_bulk.disconnect(self._on_dm_data_changed_bulk)
+                except TypeError: # Signals might not be connected if DM init failed early
+                    pass
             self.data_manager = None
             self.active_collection_path = None
         
@@ -275,6 +299,23 @@ class MainWindow(QMainWindow):
 
         # Potentially prompt to save unsaved changes if any
         logger.info(f"Closing collection: {self.active_collection_path}")
+
+        # Disconnect DataManager signals
+        if self.data_manager:
+            try:
+                self.data_manager.topic_created.disconnect(self._on_dm_topic_created)
+                self.data_manager.topic_title_changed.disconnect(self._on_dm_topic_title_changed)
+                self.data_manager.topic_content_saved.disconnect(self._on_dm_topic_content_saved)
+                self.data_manager.topic_deleted.disconnect(self._on_dm_topic_deleted)
+                self.data_manager.extraction_created.disconnect(self._on_dm_extraction_created)
+                self.data_manager.extraction_deleted.disconnect(self._on_dm_extraction_deleted)
+                self.data_manager.topic_moved.disconnect(self._on_dm_topic_moved)
+                self.data_manager.data_changed_bulk.disconnect(self._on_dm_data_changed_bulk)
+            except TypeError: # Signals might not be connected if DM init failed early or already disconnected
+                logger.warning("Error disconnecting DataManager signals, possibly already disconnected or never connected.")
+                pass
+
+
         self.data_manager = None
         self.active_collection_path = None
         self._save_last_collection_path(None) # Clear last opened path
@@ -288,11 +329,18 @@ class MainWindow(QMainWindow):
         """
         Slot connected to UndoManager.command_executed signal.
         Performs any necessary UI updates after a command has been successfully executed.
+        This can be used for UI actions not directly tied to DataManager state changes,
+        or for actions that need to happen *after* DataManager signals have been processed.
         """
-        if isinstance(command, SaveTopicContentCommand):
-            if self.editor_widget.current_topic_id == command.topic_id:
-                self.editor_widget.mark_as_saved()
-        # Add other command-specific UI updates here if needed
+        # Example: If a command had a side effect like changing selection,
+        # that wasn't a direct data change, it could be handled here.
+        # For now, most UI updates are driven by DataManager signals.
+        
+        # The SaveTopicContentCommand's effect on editor's dirty state
+        # is now handled by _on_dm_topic_content_saved.
+        pass
+        # Add other command-specific UI updates here if needed,
+        # particularly those not covered by DataManager signals.
 
     def _handle_new_topic_action(self):
         if not self.data_manager:
@@ -307,18 +355,13 @@ class MainWindow(QMainWindow):
         # A dialog could be shown here to get title/content from user.
         cmd = CreateTopicCommand(
             data_manager=self.data_manager,
-            tree_widget=self.tree_widget,
-            editor_widget=self.editor_widget,
             parent_id=parent_id,
             custom_title="New Topic", # Or prompt user
             text_content=""
         )
         try:
             self.undo_manager.execute_command(cmd)
-            # Optionally, select the new topic in the tree/editor if not handled by command's UI update
-            if cmd.new_topic_id:
-                 self.tree_widget.select_topic_item(cmd.new_topic_id) # Assumes method exists
-                 self.handle_topic_selected(cmd.new_topic_id) # To load it in editor
+            # UI update (e.g., selecting the new topic) will be handled by DataManager signals
         except Exception as e:
             logger.error(f"Error executing New Topic command: {e}", exc_info=True)
             QMessageBox.critical(self, "Error", f"Could not create new topic: {e}")
@@ -364,19 +407,26 @@ class MainWindow(QMainWindow):
         
         cmd = ChangeTopicTitleCommand(
             data_manager=self.data_manager,
-            tree_widget=self.tree_widget,
             topic_id=topic_id,
             old_title=old_title,
             new_title=new_title
         )
         try:
             self.undo_manager.execute_command(cmd)
+            # UI update will be handled by DataManager signals.
+            # If command execution fails, the DataManager signal won't be emitted,
+            # so the UI won't change. If it succeeds, the signal will trigger the update.
+            # The tree_widget itself handles the inline edit, if it fails, MainWindow
+            # should catch the error from execute_command and could tell tree_widget to revert.
+            # For now, the command failing will prevent the DataManager signal.
         except Exception as e:
             logger.error(f"Error executing Change Topic Title command: {e}", exc_info=True)
             QMessageBox.critical(self, "Error", f"Could not change topic title: {e}")
-            # Optionally, revert UI change in tree_widget if command failed
+            # Revert optimistic UI update in tree_widget if the command failed
+            # This assumes the tree_widget.topic_title_changed signal (which calls this handler)
+            # was emitted *after* the tree widget visually changed the title.
             if hasattr(self.tree_widget, 'update_topic_item_title'):
-                self.tree_widget.update_topic_item_title(topic_id, old_title)
+                 self.tree_widget.update_topic_item_title(topic_id, old_title)
             
     def save_current_topic_content(self, prompt_if_no_topic=True): # prompt_if_no_topic might be less relevant now
         if not self.data_manager or not self.editor_widget.current_topic_id:
@@ -441,8 +491,6 @@ class MainWindow(QMainWindow):
 
         cmd = ExtractTextCommand(
             data_manager=self.data_manager,
-            tree_widget=self.tree_widget,
-            editor_widget=self.editor_widget,
             parent_topic_id=parent_topic_id,
             selected_text=selected_text,
             start_char=start_char,
@@ -450,10 +498,120 @@ class MainWindow(QMainWindow):
         )
         try:
             self.undo_manager.execute_command(cmd)
-            # UI updates are handled by the command itself
+            # UI updates (new topic in tree, highlighting in editor) will be handled by DataManager signals
         except Exception as e:
             logger.error(f"Error executing Extract Text command: {e}", exc_info=True)
             QMessageBox.critical(self, "Extraction Error", f"Could not extract text: {e}")
+
+    # --- DataManager Signal Handlers ---
+
+    def _on_dm_topic_created(self, topic_id: str, parent_id: str, title: str, text_content: str):
+        logger.info(f"DM SIGNAL: Topic Created - ID: {topic_id}, Parent: {parent_id}, Title: '{title}'")
+        if self.tree_widget and hasattr(self.tree_widget, 'add_topic_item'):
+            self.tree_widget.add_topic_item(
+                topic_id=topic_id,
+                title=title,
+                parent_id=parent_id
+            )
+            # Optionally, select the new topic
+            self.tree_widget.select_topic_item(topic_id) # Assumes method exists
+            self.handle_topic_selected(topic_id) # To load it in editor
+        else:
+            logger.warning("Tree widget not available for UI update on topic_created.")
+
+    def _on_dm_topic_title_changed(self, topic_id: str, new_title: str):
+        logger.info(f"DM SIGNAL: Topic Title Changed - ID: {topic_id}, New Title: '{new_title}'")
+        if self.tree_widget and hasattr(self.tree_widget, 'update_topic_item_title'):
+            self.tree_widget.update_topic_item_title(topic_id, new_title)
+        else:
+            logger.warning("Tree widget not available for UI update on topic_title_changed.")
+        # If the currently edited topic's title changed, update editor's state if necessary
+        # (though title is usually not directly displayed in editor_widget itself for modification)
+
+    def _on_dm_topic_content_saved(self, topic_id: str):
+        logger.info(f"DM SIGNAL: Topic Content Saved - ID: {topic_id}")
+        if self.editor_widget.current_topic_id == topic_id:
+            self.editor_widget.mark_as_saved() # Update dirty status
+            # Optionally, reload content if there's a chance it was modified externally
+            # or if the save process itself normalizes content that should be re-shown.
+            # For now, mark_as_saved is the primary action.
+
+    def _on_dm_topic_deleted(self, deleted_topic_id: str, old_parent_id: str):
+        logger.info(f"DM SIGNAL: Topic Deleted - ID: {deleted_topic_id}, Old Parent: {old_parent_id}")
+        if self.editor_widget.current_topic_id == deleted_topic_id:
+            self.editor_widget.clear_content() # Clear editor if current topic deleted
+            self.editor_widget.current_topic_id = None # Reset current topic id
+
+        if self.tree_widget and hasattr(self.tree_widget, 'remove_topic_item'):
+            self.tree_widget.remove_topic_item(deleted_topic_id)
+        else:
+            logger.warning("Tree widget not available for UI update on topic_deleted.")
+        
+        # If the deleted topic was a child of the currently open topic in the editor,
+        # the parent topic's highlights might need refreshing (if it had extractions to the deleted child)
+        # This is a more complex scenario; for now, we rely on _apply_existing_highlights
+        # being called when a topic is loaded or an extraction is made/deleted directly affecting it.
+        # A simpler approach for now: if the editor shows the parent of the deleted topic, refresh its highlights.
+        if self.editor_widget.current_topic_id == old_parent_id:
+             if hasattr(self.editor_widget, '_apply_existing_highlights') and self.data_manager:
+                self.editor_widget._apply_existing_highlights(self.data_manager)
+
+
+    def _on_dm_extraction_created(self, extraction_id: str, parent_topic_id: str, child_topic_id: str, start_char: int, end_char: int):
+        logger.info(f"DM SIGNAL: Extraction Created - ID: {extraction_id} for Parent: {parent_topic_id}")
+        # The child topic itself is handled by _on_dm_topic_created.
+        # Here, we primarily care about updating the parent topic's view if it's currently open.
+        if self.editor_widget.current_topic_id == parent_topic_id:
+            if hasattr(self.editor_widget, '_apply_existing_highlights') and self.data_manager:
+                self.editor_widget._apply_existing_highlights(self.data_manager)
+            # Or, more targeted: self.editor_widget.apply_extraction_highlight(start_char, end_char)
+            # but _apply_existing_highlights is safer as it rebuilds all.
+        else:
+            logger.warning("Editor widget not showing parent of new extraction, or highlight method missing.")
+
+    def _on_dm_extraction_deleted(self, extraction_id: str, parent_topic_id: str):
+        logger.info(f"DM SIGNAL: Extraction Deleted - ID: {extraction_id} from Parent: {parent_topic_id}")
+        # If the parent topic whose extraction was removed is currently in the editor, refresh its highlights.
+        if self.editor_widget.current_topic_id == parent_topic_id:
+            if hasattr(self.editor_widget, '_apply_existing_highlights') and self.data_manager:
+                self.editor_widget._apply_existing_highlights(self.data_manager)
+        else:
+            logger.warning("Editor widget not showing parent of deleted extraction, or highlight method missing.")
+
+    def _on_dm_topic_moved(self, topic_id: str, new_parent_id: str, old_parent_id: str, new_display_order: int):
+        logger.info(f"DM SIGNAL: Topic Moved - ID: {topic_id} to Parent: {new_parent_id}")
+        if self.tree_widget and hasattr(self.tree_widget, 'move_topic_item'):
+            self.tree_widget.move_topic_item(
+                topic_id=topic_id,
+                new_parent_id=new_parent_id,
+                # The tree widget might need to re-fetch children of old_parent_id and new_parent_id
+                # or have a more sophisticated move_topic_item that handles reordering.
+                # For now, we assume it can handle this or will be reloaded by data_changed_bulk if necessary.
+                new_display_order=new_display_order # Pass this along
+            )
+        else:
+            logger.warning("Tree widget not available for UI update on topic_moved.")
+        # If the moved topic was open in the editor, its context (parent) changed.
+        # No direct editor update needed unless it affects breadcrumbs or similar.
+
+    def _on_dm_data_changed_bulk(self):
+        """Handles a signal indicating a larger, non-specific change, often requiring a full UI refresh."""
+        logger.info("DM SIGNAL: Bulk Data Change. Reloading tree data.")
+        if self.data_manager and self.tree_widget:
+            self.tree_widget.load_tree_data(self.data_manager)
+            # Current topic in editor might become invalid or its content stale.
+            # Consider reloading or clearing it.
+            current_editor_topic = self.editor_widget.current_topic_id
+            if current_editor_topic:
+                # Check if topic still exists
+                if self.data_manager.get_topic_details(current_editor_topic):
+                    self.editor_widget.load_topic_content(current_editor_topic, self.data_manager)
+                else:
+                    self.editor_widget.clear_content()
+                    self.editor_widget.current_topic_id = None
+            else:
+                self.editor_widget.clear_content()
+
 
     def closeEvent(self, event):
         # Override QMainWindow's closeEvent to handle unsaved changes or other cleanup
