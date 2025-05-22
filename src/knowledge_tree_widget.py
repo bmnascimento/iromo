@@ -1,11 +1,12 @@
 import logging
 import os # For __main__ test
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont, QStandardItem, QStandardItemModel
+from PyQt6.QtCore import Qt, pyqtSignal, QItemSelectionModel
+from PyQt6.QtGui import QFont, QStandardItem, QStandardItemModel, QKeyEvent
 from PyQt6.QtWidgets import QAbstractItemView, QTreeView
 
 from .data_manager import DataManager # Import the DataManager class
+from .commands.topic_commands import DeleteMultipleTopicsCommand # Import the command
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,7 @@ class KnowledgeTreeWidget(QTreeView):
         super().__init__(parent)
         self.setEditTriggers(QAbstractItemView.EditTrigger.SelectedClicked | QAbstractItemView.EditTrigger.EditKeyPressed)
         self.setHeaderHidden(True)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection) # Allows multiple items to be selected
 
         self.model = QStandardItemModel()
         self.setModel(self.model)
@@ -28,6 +30,7 @@ class KnowledgeTreeWidget(QTreeView):
 
         self._topic_item_map = {} # Maps topic_id to QStandardItem
         self._editing_item_old_title = None # Store title before editing starts
+        self.data_manager: DataManager = None # Will be set by load_tree_data
         
         # load_tree is no longer called here; MainWindow will call load_tree_data
 
@@ -71,11 +74,14 @@ class KnowledgeTreeWidget(QTreeView):
         logger.info(f"load_tree_data: Called. DataManager instance present: {data_manager_instance is not None}")
         if not data_manager_instance:
             logger.warning("load_tree_data: No DataManager instance provided.")
+            self.data_manager = None # Clear if invalid instance is passed
             self.clear_tree() # Show "No collection open..."
             return
+        
+        self.data_manager = data_manager_instance # Store the data manager instance
 
         self.clear_tree() # Clear previous content and placeholder
-        topics_data = data_manager_instance.get_topic_hierarchy()
+        topics_data = self.data_manager.get_topic_hierarchy()
         logger.info(f"load_tree_data: Fetched topics_data. Length: {len(topics_data) if topics_data else 'None'}")
 
         # If actual topics are being loaded, remove the default placeholder set by clear_tree()
@@ -247,9 +253,65 @@ class KnowledgeTreeWidget(QTreeView):
         else:
             logger.warning(f"Cannot select topic item: ID {topic_id} not found in tree map.")
 
+    def keyPressEvent(self, event: QKeyEvent):
+        """Handles key press events, specifically the Delete key."""
+        if event.key() == Qt.Key.Key_Delete:
+            selected_indexes = self.selectionModel().selectedIndexes()
+            
+            # We only care about column 0 for items
+            # and QTreeView can return indexes for all columns for a selected row.
+            # Filter to get unique items based on column 0.
+            unique_items_to_delete = []
+            seen_items = set()
+
+            if selected_indexes:
+                topic_ids_to_delete = []
+                for index in selected_indexes:
+                    if index.column() == 0: # Process only one index per row (e.g., from column 0)
+                        item = self.model.itemFromIndex(index)
+                        if item: # Ensure item is valid
+                            topic_id = item.data(Qt.ItemDataRole.UserRole)
+                            if topic_id and topic_id not in seen_items: # Ensure it's a real topic and not already processed
+                                topic_ids_to_delete.append(topic_id)
+                                unique_items_to_delete.append(item) # For logging or further checks if needed
+                                seen_items.add(topic_id)
+                
+                if topic_ids_to_delete:
+                    logger.info(f"Delete key pressed. Topics to delete: {topic_ids_to_delete}")
+                    
+                    if not self.data_manager:
+                        logger.error("Cannot delete topics: DataManager not available.")
+                        return
+
+                    # Access UndoManager, assuming it's on the main window
+                    undo_manager = None
+                    if hasattr(self.window(), 'undo_manager'):
+                        undo_manager = self.window().undo_manager
+                    
+                    if not undo_manager:
+                        logger.error("Cannot delete topics: UndoManager not available.")
+                        return
+
+                    command = DeleteMultipleTopicsCommand(self.data_manager, topic_ids_to_delete)
+                    undo_manager.execute_command(command)
+                    # If push_command doesn't execute, then:
+                    # undo_manager.execute_command(command) or command.execute(); undo_manager.add_command(command)
+                    # Based on typical UndoManager patterns, push_command often implies execute + add to stack.
+                    # Let's assume `push_command` handles execution. If not, this needs adjustment.
+                    logger.info(f"Executed DeleteMultipleTopicsCommand for IDs: {topic_ids_to_delete}")
+                else:
+                    logger.debug("Delete key pressed, but no valid topic items selected.")
+            else:
+                logger.debug("Delete key pressed, but no items selected.")
+            event.accept() # Indicate event was handled
+        else:
+            super().keyPressEvent(event) # Pass to parent for other keys
+
 
 if __name__ == '__main__':
     from PyQt6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QPushButton
+    # Need UndoManager for the test if we want to test delete
+    from src.undo_manager import UndoManager # Assuming path
     import sys
     import shutil # For cleaning up test directory
 
@@ -351,10 +413,38 @@ if __name__ == '__main__':
     # Create a dummy DataManager instance for the test
     test_collection_path = os.path.abspath("temp_tree_widget_test_collection")
     dummy_dm_instance = None
+    
+    # Dummy UndoManager for the test
+    class DummyUndoManager:
+        def __init__(self):
+            self.stack = []
+            logger.info("DummyUndoManager initialized for test.")
+        def push_command(self, command):
+            logger.info(f"DummyUndoManager: Pushing command: {command.description}")
+            try:
+                command.execute() # Simulate execution
+                self.stack.append(command)
+                logger.info(f"DummyUndoManager: Executed and added to stack: {command.description}")
+            except Exception as e:
+                logger.error(f"DummyUndoManager: Error executing command {command.description}: {e}")
+
+        def undo(self):
+            if self.stack:
+                command = self.stack.pop()
+                logger.info(f"DummyUndoManager: Undoing command: {command.description}")
+                try:
+                    command.undo()
+                except Exception as e:
+                    logger.error(f"DummyUndoManager: Error undoing command {command.description}: {e}")
+            else:
+                logger.info("DummyUndoManager: Undo stack empty.")
+
+    main_win.undo_manager = DummyUndoManager() # Attach to main_win for keyPressEvent to find
+
     try:
         dummy_dm_instance = DummyDataManagerForTreeTest(test_collection_path)
     
-        tree_widget = KnowledgeTreeWidget()
+        tree_widget = KnowledgeTreeWidget(parent=main_win) # Pass parent for self.window()
         tree_widget.load_tree_data(dummy_dm_instance) # Load data using the DM instance
         layout.addWidget(tree_widget)
 
@@ -382,10 +472,34 @@ if __name__ == '__main__':
         def test_clear_and_reload():
             tree_widget.clear_tree()
             logger.info("Tree cleared. Reloading with placeholder.")
-            # To test placeholder for empty collection after clear:
-            # tree_widget.load_tree_data(None) # This would show "No collection open"
-            # Or reload with dummy DM
             tree_widget.load_tree_data(dummy_dm_instance)
+        
+        def test_select_all_and_press_delete():
+            logger.info("Simulating select all and pressing Delete...")
+            # Select all items. This is a bit manual for QTreeView with QStandardItemModel
+            # We'll select the first few items for testing.
+            if tree_widget.model.rowCount() > 0:
+                # tree_widget.selectAll() # This might work depending on selection behavior
+                
+                # More explicit selection for testing:
+                selection = QItemSelection()
+                if tree_widget.model.rowCount() > 0:
+                    # Select first root item
+                    index0 = tree_widget.model.index(0, 0)
+                    selection.select(index0, index0)
+                    if tree_widget.model.rowCount() > 1:
+                         # Select second root item if exists
+                        index1 = tree_widget.model.index(1, 0)
+                        selection.select(index1, index1)
+
+                tree_widget.selectionModel().select(selection, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+                
+                # Simulate Delete key press
+                delete_event = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Delete, Qt.KeyboardModifier.NoModifier)
+                tree_widget.keyPressEvent(delete_event)
+                logger.info("Simulated Delete key press event sent.")
+            else:
+                logger.info("No items to select for delete test.")
 
 
         btn_add_root = QPushButton("Add Root Topic")
@@ -404,7 +518,12 @@ if __name__ == '__main__':
         btn_clear_reload.clicked.connect(test_clear_and_reload)
         layout.addWidget(btn_clear_reload)
 
-        main_win.setGeometry(200, 200, 400, 500)
+        btn_test_delete = QPushButton("Test Delete Selected (Simulated)")
+        btn_test_delete.clicked.connect(test_select_all_and_press_delete)
+        layout.addWidget(btn_test_delete)
+
+
+        main_win.setGeometry(200, 200, 400, 600) # Increased height for new button
         main_win.show()
         
         exit_code = app.exec()

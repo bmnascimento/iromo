@@ -215,6 +215,131 @@ class MoveTopicCommand(BaseCommand):
     def description(self) -> str:
         return self._description
 
+
+class DeleteMultipleTopicsCommand(BaseCommand):
+    def __init__(self, data_manager: DataManager, topic_ids: list[str]):
+        self.data_manager = data_manager
+        # Store only top-level selected IDs. DM handles children.
+        self.top_level_topic_ids = list(set(topic_ids)) # Ensure unique IDs
+        self._deleted_topics_data = [] # Stores list of dicts for all deleted topics (incl. descendants)
+        self._description = f"Delete {len(self.top_level_topic_ids)} topic(s)"
+        if len(self.top_level_topic_ids) == 1:
+            # Try to get a more specific title if only one topic is selected
+            # This might be too slow if get_topic_details is expensive and called here.
+            # Consider fetching title in execute or relying on a generic message.
+            # For now, keeping it simple.
+            # topic_data = self.data_manager.get_topic_details(self.top_level_topic_ids[0])
+            # if topic_data:
+            #     self._description = f"Delete Topic '{topic_data['title']}'"
+            # else:
+            self._description = f"Delete Topic" # Generic for one
+        else:
+            self._description = f"Delete {len(self.top_level_topic_ids)} Topics"
+
+
+    def execute(self):
+        logger.info(f"Executing: {self.description}")
+        self._deleted_topics_data = [] # Clear previous data if any (e.g., re-execution)
+
+        # Important: Fetch details *before* deleting.
+        # We need to collect all descendants for each top-level ID.
+        all_ids_to_fetch_details_for = set()
+        temp_all_deleted_topic_details = []
+
+        for topic_id in self.top_level_topic_ids:
+            # Get details for the topic and all its descendants
+            # This list is already ordered (parent before children)
+            descendant_details = self.data_manager.get_topic_and_all_descendants_details(topic_id)
+            if not descendant_details:
+                logger.warning(f"Could not retrieve details for topic {topic_id} or its descendants. It might have been already deleted.")
+                # Continue to attempt deletion of other topics if any.
+                # If this topic was the only one, the command might effectively do nothing.
+            else:
+                temp_all_deleted_topic_details.extend(descendant_details)
+        
+        # Ensure uniqueness and correct order for undo (parents before children)
+        # get_topic_and_all_descendants_details should provide them in a suitable order (pre-order traversal)
+        # We store them in the order they are fetched, which should be suitable for restoration.
+        # To ensure no duplicates if multiple selected items lead to the same descendant (not typical for tree selection):
+        seen_ids = set()
+        for details in temp_all_deleted_topic_details:
+            if details['id'] not in seen_ids:
+                self._deleted_topics_data.append(details)
+                seen_ids.add(details['id'])
+        
+        # Sort by depth (approximated by parent_id presence) then creation for stable undo
+        # This is complex. For now, rely on the order from get_topic_and_all_descendants_details.
+        # A more robust way for undo is to restore in the exact order of deletion,
+        # or ensure parents are created before children. The current structure of _deleted_topics_data
+        # (list of dicts from pre-order traversal) should be fine.
+
+        # Now, perform the deletions for the top-level selected items
+        # DataManager's delete_topic will handle cascading.
+        deleted_count = 0
+        for topic_id in self.top_level_topic_ids:
+            # Check if topic still exists (it might have been deleted as a child of another selected topic)
+            # A simple check: is it still in our _deleted_topics_data list by ID?
+            # More accurately, the DataManager.delete_topic will handle non-existent topics gracefully.
+            if any(t['id'] == topic_id for t in self._deleted_topics_data): # Check if it was part of the collected data
+                if self.data_manager.delete_topic(topic_id):
+                    deleted_count +=1
+                else:
+                    # If a top-level delete fails, we have a problem.
+                    # The _deleted_topics_data might be partially relevant.
+                    # For now, log and continue, but this indicates an issue.
+                    logger.error(f"Failed to delete topic {topic_id} during multi-delete operation.")
+                    # Potentially raise an error or handle partial success/failure.
+                    # For simplicity, we assume DM's delete_topic is robust.
+            else:
+                logger.info(f"Topic {topic_id} was likely deleted as a descendant of another selected topic. Skipping explicit delete.")
+
+
+        if not self._deleted_topics_data: # No topics were actually processed for deletion
+             logger.warning(f"DeleteMultipleTopicsCommand: No topic data was collected for deletion. Command may have no effect.")
+             # This can happen if all specified topic_ids were already deleted or invalid.
+        
+        # Refine description based on actual number of top-level items processed for deletion
+        # This is tricky because _deleted_topics_data contains all descendants.
+        # The initial description based on self.top_level_topic_ids is probably best.
+        logger.info(f"DeleteMultipleTopicsCommand: execute completed. {len(self._deleted_topics_data)} total items (incl. children) marked for undo.")
+
+
+    def undo(self):
+        logger.info(f"Undoing: {self.description}")
+        if not self._deleted_topics_data:
+            logger.warning("Cannot undo DeleteMultipleTopicsCommand: no data to restore.")
+            return
+
+        # Restore topics. The order matters: parents must be restored before children.
+        # The _deleted_topics_data should be in pre-order (parent before children).
+        restored_count = 0
+        for topic_data in self._deleted_topics_data:
+            # Ensure all necessary fields are present from get_topic_and_all_descendants_details
+            # 'content' was added to topic_data in that method.
+            # 'display_order' should also be there.
+            restored_id = self.data_manager.create_topic(
+                topic_id=topic_data['id'],
+                parent_id=topic_data.get('parent_id'), # Use .get for safety
+                custom_title=topic_data['title'],
+                text_content=topic_data.get('content', ''), # Ensure content exists
+                text_file_uuid=topic_data['text_file_uuid'],
+                created_at=topic_data['created_at'],
+                updated_at=topic_data['updated_at'],
+                display_order=topic_data.get('display_order') # Ensure display_order is handled
+            )
+            if restored_id:
+                restored_count += 1
+            else:
+                logger.error(f"Failed to restore topic {topic_data['id']} during undo.")
+                # This is problematic. The undo is partial.
+        
+        logger.info(f"DeleteMultipleTopicsCommand: undo completed. {restored_count}/{len(self._deleted_topics_data)} topics attempted to restore.")
+        # UI updates will be handled by listeners to DataManager.topic_created signal
+
+    @property
+    def description(self) -> str:
+        return self._description
+
 # A helper method in DataManager like get_topic_details(topic_id) -> dict
 # would be useful for commands to fetch topic titles for descriptions.
 # Example:
