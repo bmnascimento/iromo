@@ -17,16 +17,16 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from commands.topic_commands import (
+from .commands.topic_commands import (
     ChangeTopicTitleCommand,
     CreateTopicCommand,
     ExtractTextCommand,
     SaveTopicContentCommand,
 )
-from data_manager import DB_FILENAME, TEXT_FILES_SUBDIR, DataManager
-from knowledge_tree_widget import KnowledgeTreeWidget
-from topic_editor_widget import TopicEditorWidget
-from undo_manager import UndoManager
+from .data_manager import DB_FILENAME, TEXT_FILES_SUBDIR, DataManager
+from .knowledge_tree_widget import KnowledgeTreeWidget
+from .topic_editor_widget import TopicEditorWidget
+from .undo_manager import UndoManager
 # Import MoveTopicCommand when tree reordering is implemented
 logger = logging.getLogger(__name__)
 APP_ORGANIZATION_NAME = "IromoOrg" # For QSettings

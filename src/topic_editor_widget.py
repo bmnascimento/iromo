@@ -12,7 +12,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import QApplication, QTextEdit
 
-from data_manager import DataManager # Import the DataManager class
+from .data_manager import DataManager # Import the DataManager class
 
 logger = logging.getLogger(__name__)
 

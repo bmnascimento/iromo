@@ -3,8 +3,8 @@ import sys
 
 from PyQt6.QtWidgets import QApplication
 
-from logger_config import APP_NAME, setup_logging
-from main_window import MainWindow
+from .logger_config import APP_NAME, setup_logging
+from .main_window import MainWindow
 
 def run_app():
     """Initializes and runs the Iromo application."""

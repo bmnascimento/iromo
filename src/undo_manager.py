@@ -3,7 +3,7 @@ from typing import List, Optional
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from commands.base_command import BaseCommand
+from .commands.base_command import BaseCommand
 
 logger = logging.getLogger(__name__)
 
