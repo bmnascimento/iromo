@@ -10,14 +10,18 @@ from .data_manager import DataManager # Import the DataManager class
 logger = logging.getLogger(__name__)
 
 class TopicEditorWidget(QTextEdit):
-    content_changed_externally = pyqtSignal()
+    content_changed_externally = pyqtSignal() # Emitted if content is changed by an external action (e.g. undo/redo of save)
+    dirty_changed = pyqtSignal(bool) # Emitted when the dirty state changes
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_topic_id = None
+        self.original_content = "" # Stores the content as it was when loaded or last saved
+        self._is_dirty = False      # True if content has changed since last load/save
         self.setFont(QFont("Arial", 12))
         self.setAcceptRichText(True)
         self.setPlaceholderText("No collection open or no topic selected.")
+        self.textChanged.connect(self._handle_text_changed)
 
 
     def _get_document_text_for_logging(self):
@@ -38,7 +42,9 @@ class TopicEditorWidget(QTextEdit):
         content = data_manager_instance.get_topic_content(topic_id)
         if content is not None:
             self.current_topic_id = topic_id
+            self.original_content = content # Store original content
             self.setPlainText(content)
+            self.mark_as_clean() # Sets _is_dirty to False and emits signal
             logger.debug(f"After setPlainText for {topic_id}. Doc text: '{self._get_document_text_for_logging()}'")
 
             cursor = self.textCursor()
@@ -54,6 +60,8 @@ class TopicEditorWidget(QTextEdit):
             self.current_topic_id = None # Ensure this is reset
             self.setPlaceholderText(f"Could not load content for topic {topic_id}.")
             logger.warning(f"Content for topic_id {topic_id} was None.")
+            self.original_content = ""
+            self.mark_as_clean()
 
     def _apply_existing_highlights(self, data_manager_instance: DataManager):
         """Applies highlights for all extractions using the provided DataManager."""
@@ -127,6 +135,42 @@ class TopicEditorWidget(QTextEdit):
         self.current_topic_id = None
         super().clear() 
         self.setPlaceholderText("Select a topic to view or edit its content, or open a collection.")
+        self.original_content = ""
+        self.mark_as_clean()
+
+    def _handle_text_changed(self):
+        """Sets the dirty flag if the current content differs from original_content."""
+        if not self._is_dirty: # Only change and emit if it wasn't already dirty
+            # More robust check: compare current text to original_content
+            # However, any textChanged signal implies a modification from the loaded state.
+            current_text = self.toPlainText()
+            if current_text != self.original_content:
+                self._is_dirty = True
+                self.dirty_changed.emit(True)
+                logger.debug(f"TopicEditorWidget for {self.current_topic_id} became dirty.")
+
+    def is_dirty(self) -> bool:
+        """Returns True if the content has been modified since it was last loaded or saved."""
+        return self._is_dirty
+
+    def mark_as_saved(self):
+        """
+        Marks the current content as saved by updating the original_content baseline
+        and resetting the dirty flag.
+        """
+        self.original_content = self.toPlainText()
+        self.mark_as_clean()
+        logger.debug(f"TopicEditorWidget for {self.current_topic_id} marked as saved (clean).")
+
+    def mark_as_clean(self):
+        """Resets the dirty flag and emits the dirty_changed signal if state changes."""
+        if self._is_dirty:
+            self._is_dirty = False
+            self.dirty_changed.emit(False)
+        # If it was already clean, no need to emit the signal again.
+        # However, to ensure consistency, we can always set and emit:
+        # self._is_dirty = False
+        # self.dirty_changed.emit(False)
 
 
 if __name__ == '__main__':

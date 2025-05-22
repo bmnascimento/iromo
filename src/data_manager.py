@@ -301,6 +301,28 @@ class DataManager:
         finally:
             conn.close()
 
+    def get_topic_details(self, topic_id):
+        """
+        Retrieves all details for a specific topic.
+        Returns a dictionary of the topic's data, or None if not found.
+        """
+        conn = self._get_db_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT id, parent_id, title, text_file_uuid, created_at, updated_at, display_order
+                FROM topics
+                WHERE id = ?
+            """, (topic_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        except sqlite3.Error as e:
+            logger.error(f"Error fetching details for topic {topic_id} from {self.db_path}: {e}")
+            return None
+        finally:
+            if conn:
+                conn.close()
+
     def create_extraction(self, parent_topic_id, child_topic_id, start_char, end_char):
         """
         Records an extraction event in the collection's database.
@@ -361,6 +383,126 @@ class DataManager:
         except Exception as e:
             logger.error(f"Error fetching extractions for parent {parent_topic_id} from {self.db_path}: {e}")
             return []
+        finally:
+            conn.close()
+
+    def delete_topic(self, topic_id):
+        """
+        Deletes a topic, its associated text file, and related extractions.
+        Prevents deletion if the topic has child topics.
+        Returns True on success, False on failure.
+        """
+        conn = self._get_db_connection()
+        cursor = conn.cursor()
+
+        try:
+            # Check for child topics
+            cursor.execute("SELECT COUNT(*) FROM topics WHERE parent_id = ?", (topic_id,))
+            child_count = cursor.fetchone()[0]
+            if child_count > 0:
+                logger.error(f"Cannot delete topic {topic_id}: it has {child_count} child topic(s).")
+                return False
+
+            # Get text_file_uuid to delete the file
+            cursor.execute("SELECT text_file_uuid FROM topics WHERE id = ?", (topic_id,))
+            row = cursor.fetchone()
+            if not row:
+                logger.warning(f"Topic {topic_id} not found for deletion.")
+                return False # Topic doesn't exist
+            
+            text_file_uuid = row['text_file_uuid']
+            text_file_path = self._get_topic_text_file_path(text_file_uuid)
+
+            # Delete associated extractions (where this topic is parent or child)
+            cursor.execute("DELETE FROM extractions WHERE parent_topic_id = ? OR child_topic_id = ?", (topic_id, topic_id))
+            logger.info(f"Deleted extractions associated with topic {topic_id}.")
+
+            # Delete the topic itself
+            cursor.execute("DELETE FROM topics WHERE id = ?", (topic_id,))
+            if cursor.rowcount == 0:
+                # Should not happen if previous select worked, but as a safeguard
+                logger.warning(f"Topic {topic_id} was not found during delete operation after initial checks.")
+                conn.rollback() # Rollback if topic suddenly disappeared
+                return False
+
+            conn.commit()
+
+            # Delete the text file after successful DB commit
+            if os.path.exists(text_file_path):
+                try:
+                    os.remove(text_file_path)
+                    logger.info(f"Deleted text file: {text_file_path}")
+                except OSError as e:
+                    logger.error(f"Error deleting text file {text_file_path}: {e}")
+                    # Log error but consider deletion successful as DB part is done
+            
+            logger.info(f"Topic {topic_id} and associated data deleted successfully.")
+            return True
+
+        except sqlite3.Error as e:
+            conn.rollback()
+            logger.error(f"Error deleting topic {topic_id}: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def delete_extraction(self, extraction_id):
+        """
+        Deletes an extraction record from the database.
+        Returns True on success, False on failure.
+        """
+        conn = self._get_db_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("DELETE FROM extractions WHERE id = ?", (extraction_id,))
+            if cursor.rowcount == 0:
+                logger.warning(f"Extraction {extraction_id} not found for deletion.")
+                return False
+            conn.commit()
+            logger.info(f"Extraction {extraction_id} deleted successfully.")
+            return True
+        except sqlite3.Error as e:
+            conn.rollback()
+            logger.error(f"Error deleting extraction {extraction_id}: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def move_topic(self, topic_id, new_parent_id, new_display_order):
+        """
+        Moves a topic to a new parent and/or updates its display order.
+        Args:
+            topic_id (str): The ID of the topic to move.
+            new_parent_id (str, optional): The ID of the new parent topic. Can be None for root topics.
+            new_display_order (int): The new display order for the topic under its parent.
+        Returns:
+            bool: True if the move was successful, False otherwise.
+        """
+        conn = self._get_db_connection()
+        cursor = conn.cursor()
+        now = dt.datetime.now()
+        try:
+            # Ensure topic_id is not being moved under itself or one of its descendants (prevent cycles)
+            # This is a more complex check, for now, we assume valid moves.
+            # A full check would involve traversing up from new_parent_id to ensure topic_id is not an ancestor.
+
+            cursor.execute("""
+                UPDATE topics
+                SET parent_id = ?, display_order = ?, updated_at = ?
+                WHERE id = ?
+            """, (new_parent_id, new_display_order, now, topic_id))
+            
+            if cursor.rowcount == 0:
+                logger.error(f"Topic with ID {topic_id} not found for move operation.")
+                return False
+            
+            conn.commit()
+            logger.info(f"Topic {topic_id} moved to parent {new_parent_id} with display_order {new_display_order}.")
+            return True
+        except sqlite3.Error as e:
+            conn.rollback()
+            logger.error(f"Error moving topic {topic_id}: {e}")
+            return False
         finally:
             conn.close()
 

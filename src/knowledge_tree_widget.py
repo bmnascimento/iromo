@@ -8,8 +8,9 @@ import os # For __main__ test
 logger = logging.getLogger(__name__)
 
 class KnowledgeTreeWidget(QTreeView):
-    topic_selected = pyqtSignal(str) 
-    topic_title_changed = pyqtSignal(str, str)
+    topic_selected = pyqtSignal(str) # topic_id
+    # Emits topic_id, old_title (fetched by MainWindow), new_title
+    topic_title_changed = pyqtSignal(str, str, str) # topic_id, old_title, new_title
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -24,6 +25,7 @@ class KnowledgeTreeWidget(QTreeView):
         self.selectionModel().selectionChanged.connect(self._handle_selection_changed)
 
         self._topic_item_map = {} # Maps topic_id to QStandardItem
+        self._editing_item_old_title = None # Store title before editing starts
         
         # load_tree is no longer called here; MainWindow will call load_tree_data
 
@@ -99,11 +101,34 @@ class KnowledgeTreeWidget(QTreeView):
         self.expandAll() # Optionally expand all items after loading
 
     def _handle_item_changed(self, item: QStandardItem):
+        # This signal is emitted *after* the item's data (text) has changed.
         topic_id = item.data(Qt.ItemDataRole.UserRole)
         new_title = item.text()
-        if topic_id and new_title:
-            logger.info(f"Tree item changed: ID {topic_id}, New Text: '{new_title}'")
-            self.topic_title_changed.emit(topic_id, new_title)
+
+        if topic_id and self._editing_item_old_title is not None:
+            if new_title != self._editing_item_old_title:
+                logger.info(f"Tree item changed: ID {topic_id}, Old: '{self._editing_item_old_title}', New: '{new_title}'")
+                self.topic_title_changed.emit(topic_id, self._editing_item_old_title, new_title)
+            else:
+                logger.info(f"Tree item data changed but title remained the same for {topic_id}: '{new_title}'")
+        elif topic_id:
+            # This case might happen if itemChanged is triggered for reasons other than text edit completion,
+            # or if _editing_item_old_title was not set.
+            # For robustness, we could fetch the "current" title from data_manager as old_title if needed,
+            # but that's best handled by the command creator (MainWindow).
+            # For now, we rely on _editing_item_old_title being set.
+            logger.warning(f"Item {topic_id} changed, but old title was not captured. New title: '{new_title}'")
+
+        self._editing_item_old_title = None # Reset after processing
+
+    def edit(self, index, trigger, event):
+        # Override edit to capture the old title before editing begins
+        if index.isValid() and trigger != QAbstractItemView.EditTrigger.NoEditTriggers:
+            item = self.model.itemFromIndex(index)
+            if item and item.isEditable():
+                self._editing_item_old_title = item.text()
+                logger.debug(f"Starting edit for item '{self._editing_item_old_title}', topic_id: {item.data(Qt.ItemDataRole.UserRole)}")
+        return super().edit(index, trigger, event)
 
     def _handle_selection_changed(self, selected, deselected):
         indexes = selected.indexes()
@@ -165,6 +190,20 @@ class KnowledgeTreeWidget(QTreeView):
             if item:
                 return item.data(Qt.ItemDataRole.UserRole) # Returns None if not a topic item
         return None
+    
+    def get_current_selected_topic_id(self):
+        """Returns the topic_id of the currently selected item, or None."""
+        return self.get_selected_topic_id() # Alias for clarity/consistency
+
+    def select_topic_item(self, topic_id: str):
+        """Selects the tree item corresponding to the given topic_id."""
+        if topic_id in self._topic_item_map:
+            item = self._topic_item_map[topic_id]
+            self.setCurrentIndex(item.index())
+            self.scrollTo(item.index(), QAbstractItemView.ScrollHint.PositionAtCenter)
+        else:
+            logger.warning(f"Cannot select topic item: ID {topic_id} not found in tree map.")
+
 
 if __name__ == '__main__':
     from PyQt6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QPushButton
