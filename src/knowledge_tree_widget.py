@@ -372,48 +372,37 @@ class KnowledgeTreeWidget(QTreeView):
             QMessageBox.warning(self, "Add Child", "Please select a parent topic first.")
             return
 
-        # Prompt for the new topic name
-        child_topic_name, ok = QInputDialog.getText(self, "Add Child Topic", "Enter name for the new child topic:")
+        logger.info(f"Attempting to add child topic to parent '{parent_topic_id}'.")
+        
+        if not self.data_manager:
+            logger.error("Cannot add child topic: DataManager not available.")
+            QMessageBox.critical(self, "Error", "DataManager is not available. Cannot add topic.")
+            return
 
-        if ok and child_topic_name:
-            logger.info(f"Attempting to add child topic '{child_topic_name}' to parent '{parent_topic_id}'.")
-            
-            if not self.data_manager:
-                logger.error("Cannot add child topic: DataManager not available.")
-                QMessageBox.critical(self, "Error", "DataManager is not available. Cannot add topic.")
-                return
+        undo_manager = None
+        if hasattr(self.window(), 'undo_manager'):
+            undo_manager = self.window().undo_manager
+        
+        if not undo_manager:
+            logger.error("Cannot add child topic: UndoManager not available.")
+            QMessageBox.critical(self, "Error", "UndoManager is not available. Cannot add topic.")
+            return
 
-            undo_manager = None
-            if hasattr(self.window(), 'undo_manager'):
-                undo_manager = self.window().undo_manager
-            
-            if not undo_manager:
-                logger.error("Cannot add child topic: UndoManager not available.")
-                QMessageBox.critical(self, "Error", "UndoManager is not available. Cannot add topic.")
-                return
-
-            command = CreateTopicCommand(
-                data_manager=self.data_manager,
-                parent_id=parent_topic_id,
-                custom_title=child_topic_name,
-                text_content="" # Child topics start with empty content by default
-            )
-            
-            try:
-                undo_manager.execute_command(command) # Assumes execute_command also adds to stack
-                logger.info(f"Executed CreateTopicCommand for new child '{child_topic_name}' under parent '{parent_topic_id}'.")
-                # The KnowledgeTreeWidget should update automatically if it's listening to
-                # DataManager.topic_created signal (typically via MainWindow).
-                # If direct refresh is needed and not handled by signals:
-                # self.load_tree_data(self.data_manager) # Or a more targeted update
-            except Exception as e:
-                logger.error(f"Error executing CreateTopicCommand: {e}")
-                QMessageBox.critical(self, "Error", f"Failed to add child topic: {e}")
-        elif ok and not child_topic_name:
-            logger.info("Add Child: User provided an empty name.")
-            QMessageBox.information(self, "Add Child", "Topic name cannot be empty.")
-        else:
-            logger.info("Add Child: User cancelled the dialog.")
+        command = CreateTopicCommand(
+            data_manager=self.data_manager,
+            parent_id=parent_topic_id,
+            custom_title=None, # Use default timestamp placeholder
+            text_content="" # Child topics start with empty content by default
+        )
+        
+        try:
+            undo_manager.execute_command(command) # Assumes execute_command also adds to stack
+            logger.info(f"Executed CreateTopicCommand for new child under parent '{parent_topic_id}'.")
+            # The KnowledgeTreeWidget should update automatically if it's listening to
+            # DataManager.topic_created signal (typically via MainWindow).
+        except Exception as e:
+            logger.error(f"Error executing CreateTopicCommand: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to add child topic: {e}")
 
     def _handle_add_sibling(self):
         """Handles adding a sibling topic to the selected topic."""
@@ -443,45 +432,36 @@ class KnowledgeTreeWidget(QTreeView):
             logger.info(f"Add Sibling: Selected item '{selected_item.text()}' is a root topic. New sibling will also be a root topic.")
 
 
-        # Prompt for the new topic name
-        sibling_topic_name, ok = QInputDialog.getText(self, "Add Sibling Topic", "Enter name for the new sibling topic:")
+        logger.info(f"Attempting to add sibling topic with parent_id '{sibling_parent_id}'.")
 
-        if ok and sibling_topic_name:
-            logger.info(f"Attempting to add sibling topic '{sibling_topic_name}' with parent_id '{sibling_parent_id}'.")
+        if not self.data_manager:
+            logger.error("Cannot add sibling topic: DataManager not available.")
+            QMessageBox.critical(self, "Error", "DataManager is not available. Cannot add topic.")
+            return
 
-            if not self.data_manager:
-                logger.error("Cannot add sibling topic: DataManager not available.")
-                QMessageBox.critical(self, "Error", "DataManager is not available. Cannot add topic.")
-                return
+        undo_manager = None
+        if hasattr(self.window(), 'undo_manager'):
+            undo_manager = self.window().undo_manager
+        
+        if not undo_manager:
+            logger.error("Cannot add sibling topic: UndoManager not available.")
+            QMessageBox.critical(self, "Error", "UndoManager is not available. Cannot add topic.")
+            return
 
-            undo_manager = None
-            if hasattr(self.window(), 'undo_manager'):
-                undo_manager = self.window().undo_manager
-            
-            if not undo_manager:
-                logger.error("Cannot add sibling topic: UndoManager not available.")
-                QMessageBox.critical(self, "Error", "UndoManager is not available. Cannot add topic.")
-                return
-
-            command = CreateTopicCommand(
-                data_manager=self.data_manager,
-                parent_id=sibling_parent_id, # This will be None for root topics
-                custom_title=sibling_topic_name,
-                text_content="" # New topics start with empty content
-            )
-            
-            try:
-                undo_manager.execute_command(command)
-                logger.info(f"Executed CreateTopicCommand for new sibling '{sibling_topic_name}' (parent ID: {sibling_parent_id}).")
-                # Tree updates are expected via signals from DataManager
-            except Exception as e:
-                logger.error(f"Error executing CreateTopicCommand for sibling: {e}")
-                QMessageBox.critical(self, "Error", f"Failed to add sibling topic: {e}")
-        elif ok and not sibling_topic_name:
-            logger.info("Add Sibling: User provided an empty name.")
-            QMessageBox.information(self, "Add Sibling", "Topic name cannot be empty.")
-        else:
-            logger.info("Add Sibling: User cancelled the dialog.")
+        command = CreateTopicCommand(
+            data_manager=self.data_manager,
+            parent_id=sibling_parent_id, # This will be None for root topics
+            custom_title=None, # Use default timestamp placeholder
+            text_content="" # New topics start with empty content
+        )
+        
+        try:
+            undo_manager.execute_command(command)
+            logger.info(f"Executed CreateTopicCommand for new sibling (parent ID: {sibling_parent_id}).")
+            # Tree updates are expected via signals from DataManager
+        except Exception as e:
+            logger.error(f"Error executing CreateTopicCommand for sibling: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to add sibling topic: {e}")
 
 
 if __name__ == '__main__':

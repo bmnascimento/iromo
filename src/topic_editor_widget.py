@@ -1,5 +1,6 @@
 import logging
 import os # For __main__ test
+import re # For placeholder title detection
 import shutil # For __main__ test cleanup
 import datetime # For __main__ test
 
@@ -460,9 +461,59 @@ class TopicEditorWidget(QWidget): # Changed from QTextEdit to QWidget
         """Returns True if the content has been modified since it was last loaded or saved."""
         return self._is_dirty
 
+    def _check_and_update_placeholder_title(self):
+        """
+        Checks if the current topic has a placeholder title and updates it
+        based on the first line/50 chars of content if applicable.
+        Returns True if title was updated, False otherwise.
+        """
+        if not self.current_topic_id or not self.data_manager:
+            return False
+
+        topic_details = self.data_manager.get_topic_details(self.current_topic_id)
+        if not topic_details:
+            logger.warning(f"Could not get details for topic {self.current_topic_id} to check placeholder title.")
+            return False
+
+        current_title = topic_details.get('title', '')
+        # Regex for "Topic YYYY-MM-DD HH:MM:SS"
+        placeholder_pattern = r"^Topic \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$"
+
+        if re.match(placeholder_pattern, current_title):
+            plain_text_content = self.editor.document().toPlainText()
+            
+            if not plain_text_content.strip(): # Content is empty or only whitespace
+                logger.debug(f"Topic {self.current_topic_id} has placeholder title '{current_title}' but content is empty. Title not changed.")
+                return False
+
+            new_title_candidate = plain_text_content[:50]
+            newline_index = new_title_candidate.find('\n')
+            if newline_index != -1:
+                new_title_candidate = new_title_candidate[:newline_index]
+            
+            new_title_candidate = new_title_candidate.strip()
+
+            if new_title_candidate:
+                logger.info(f"Topic {self.current_topic_id} has placeholder title '{current_title}'. Updating to: '{new_title_candidate}'")
+                try:
+                    # This method will need to be added to DataManager
+                    self.data_manager.update_topic_title(self.current_topic_id, new_title_candidate)
+                    # The DataManager's update_topic_title method should emit a signal
+                    # (e.g., topic_updated or topic_metadata_changed) which the
+                    # KnowledgeTreeWidget listens to for updating the display.
+                    return True
+                except Exception as e:
+                    logger.error(f"Failed to update placeholder title for topic {self.current_topic_id}: {e}", exc_info=True)
+                    return False
+            else:
+                logger.debug(f"Topic {self.current_topic_id} has placeholder title '{current_title}' but extracted new title is empty. Title not changed.")
+                return False
+        return False
+
     def force_save_if_dirty(self, wait_for_completion=False):
         """
         If the content is dirty, triggers an immediate save.
+        Optionally updates placeholder title before saving.
         If wait_for_completion is True, this method will block until the save is done.
         Otherwise, it will attempt to save in the background.
         """
@@ -470,7 +521,12 @@ class TopicEditorWidget(QWidget): # Changed from QTextEdit to QWidget
             logger.debug(f"Force save called for {self.current_topic_id}, but not dirty or no topic/DM. Skipping.")
             return
 
-        logger.info(f"Force saving content for topic {self.current_topic_id} (wait_for_completion={wait_for_completion}).")
+        # If we are proceeding to save because it's dirty, then check and update title.
+        self._check_and_update_placeholder_title()
+        # If title was updated, DataManager.update_topic_title was called.
+        # The main window (KnowledgeTreeWidget) should observe DataManager signals for topic changes.
+
+        logger.info(f"Force saving content for topic {self.current_topic_id} (wait_for_completion={wait_for_completion}). Dirty: {self._is_dirty}")
         content_to_save = self.editor.toHtml()
 
         if self.save_thread and self.save_thread.isRunning():
@@ -478,16 +534,20 @@ class TopicEditorWidget(QWidget): # Changed from QTextEdit to QWidget
             if wait_for_completion:
                 logger.info(f"Waiting for existing save thread to complete for topic {self.current_topic_id}.")
                 self.save_thread.wait() # Wait for the existing thread to finish
-                if not self._is_dirty:
-                    logger.info(f"Force save for {self.current_topic_id}: Content became clean while waiting. Skipping new save.")
-                    return
+                # After waiting, the content might have been saved by the other thread, making it clean.
+                # The title update (if applicable for *this* call's context) has already been attempted.
+                if not self._is_dirty: # Check current dirty state after wait
+                    logger.info(f"Force save for {self.current_topic_id}: Content became clean while waiting for another save. Skipping further content save in this call.")
+                    return # Content is clean, title (if placeholder) was already processed.
                 logger.info(f"Force save for {self.current_topic_id}: Content still dirty after waiting. Proceeding with current save.")
-            else:
+            else: # not wait_for_completion
                 logger.info(f"Force save for {self.current_topic_id}: Save in progress, and not waiting. Skipping this save trigger.")
                 return
-
+        
+        # If, after all checks and potential waits, the content is no longer dirty,
+        # we might not need to save the content. The title update (if any) has already occurred.
         if not self._is_dirty:
-            logger.info(f"Force save for {self.current_topic_id}: Content is no longer dirty (checked after potential wait). Skipping.")
+            logger.info(f"Force save for {self.current_topic_id}: Content is no longer dirty (e.g. saved by waited thread, or was never dirty enough for this stage). Skipping content save.")
             return
 
         if wait_for_completion:
@@ -498,8 +558,14 @@ class TopicEditorWidget(QWidget): # Changed from QTextEdit to QWidget
             except Exception as e:
                 logger.error(f"Force save (blocking) for topic {self.current_topic_id} failed: {e}", exc_info=True)
                 self._handle_save_failure(str(e))
-        else: # Asynchronous save
-            logger.info(f"Force save (non-blocking) for topic {self.current_topic_id}. Initiating background save.")
+        else:
+            # Background save logic
+            logger.info(f"Force save (background) for topic {self.current_topic_id} initiated.")
+            # Ensure no other save thread from this editor instance is running
+            if self.save_thread and self.save_thread.isRunning():
+                 logger.warning(f"Background save for {self.current_topic_id}: Previous save worker from this editor instance still active. Skipping new background save.")
+                 return
+
             self.save_thread = QThread(self)
             self.save_worker = SaveWorker(self.data_manager, self.current_topic_id, content_to_save)
             self.save_worker.moveToThread(self.save_thread)
@@ -509,9 +575,9 @@ class TopicEditorWidget(QWidget): # Changed from QTextEdit to QWidget
             self.save_worker.finished.connect(self.save_thread.quit)
             self.save_worker.finished.connect(self.save_worker.deleteLater)
             self.save_thread.finished.connect(self.save_thread.deleteLater)
+            self.save_thread.finished.connect(lambda: setattr(self, 'save_thread', None)) # Clear self.save_thread
             self.save_thread.started.connect(self.save_worker.run)
             self.save_thread.start()
-
 
     def mark_as_saved(self, saved_content: str):
         """

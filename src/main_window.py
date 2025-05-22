@@ -399,7 +399,7 @@ class MainWindow(QMainWindow):
         cmd = CreateTopicCommand(
             data_manager=self.data_manager,
             parent_id=parent_id,
-            custom_title="New Topic", # Or prompt user
+            custom_title=None, # Use default timestamp placeholder
             text_content=""
         )
         try:
@@ -514,19 +514,38 @@ class MainWindow(QMainWindow):
                  return
         
         logger.info(f"Attempting to extract: '{selected_text}' from parent {parent_topic_id} (chars {start_char}-{end_char})")
-        # Get topic title for command description
-        parent_topic_details = self.data_manager.get_topic_details(parent_topic_id)
+        
+        # Generate title from selected text
+        custom_child_title = None
+        if selected_text:
+            first_50_chars = selected_text[:50]
+            newline_index = first_50_chars.find('\n')
+            if newline_index != -1:
+                candidate_title = first_50_chars[:newline_index]
+            else:
+                candidate_title = first_50_chars
+            
+            candidate_title = candidate_title.strip()
+            if candidate_title: # Only use if not empty after stripping
+                custom_child_title = candidate_title
+            # If candidate_title is empty, custom_child_title remains None,
+            # and DataManager will use the timestamp placeholder.
 
         cmd = ExtractTextCommand(
             data_manager=self.data_manager,
             parent_topic_id=parent_topic_id,
             selected_text=selected_text,
             start_char=start_char,
-            end_char=end_char
+            end_char=end_char,
+            custom_child_title=custom_child_title # Pass the generated title
         )
         try:
             self.undo_manager.execute_command(cmd)
             # UI updates (new topic in tree, highlighting in editor) will be handled by DataManager signals
+            # Potentially select the new child topic in the tree.
+            if cmd.child_topic_id: # Check if command execution was successful and child_topic_id is set
+                self.tree_widget.select_topic_item(cmd.child_topic_id)
+                self.handle_topic_selected(cmd.child_topic_id) # Load it in editor
         except Exception as e:
             logger.error(f"Error executing Extract Text command: {e}", exc_info=True)
             QMessageBox.critical(self, "Extraction Error", f"Could not extract text: {e}")
