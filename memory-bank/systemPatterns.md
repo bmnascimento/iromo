@@ -190,3 +190,54 @@ graph TD
 
 ---
 2025-05-21 22:57:54 - Added detailed GUI testing strategies and TDD recommendations.
+---
+2025-05-21 23:41:53 - Added SQLite datetime handling pattern.
+
+## Coding Patterns
+
+### SQLite Datetime Handling (Established in `src/data_manager.py`)
+
+*   **Objective:** Ensure correct and future-proof handling of `datetime` objects with `sqlite3`, avoiding `DeprecationWarning`s from Python 3.12+.
+*   **Import:**
+    ```python
+    import datetime as dt
+    ```
+*   **Adapter Function (Python `datetime` to SQLite Text):**
+    ```python
+    # In src/data_manager.py
+    # logger = logging.getLogger(__name__) # Assuming logger is already defined
+    def adapt_datetime_iso(datetime_obj):
+        """Adapt dt.datetime to timezone-naive ISO 8601 format."""
+        # logger.debug(f"Adapting datetime: {datetime_obj} of type {type(datetime_obj)}") # Logging is optional here
+        return datetime_obj.isoformat()
+    ```
+*   **Converter Function (SQLite Text to Python `datetime`):**
+    ```python
+    # In src/data_manager.py
+    def convert_timestamp_iso(val_bytes):
+        """Convert ISO 8601 string (bytes) to dt.datetime object."""
+        # logger.debug(f"Converting timestamp bytes: {val_bytes} of type {type(val_bytes)}") # Logging is optional here
+        val_str = val_bytes.decode() if isinstance(val_bytes, bytes) else val_bytes
+        converted = dt.datetime.fromisoformat(val_str)
+        # logger.debug(f"Converted to datetime: {converted} of type {type(converted)}") # Logging is optional here
+        return converted
+    ```
+*   **Global Registration (typically at module level):**
+    ```python
+    # In src/data_manager.py
+    import sqlite3
+    # ... other imports and adapter/converter definitions ...
+    sqlite3.register_adapter(dt.datetime, adapt_datetime_iso)
+    sqlite3.register_converter("timestamp", convert_timestamp_iso) # "timestamp" matches column type in schema
+    ```
+*   **Database Connection (Enable Type Detection):**
+    ```python
+    # In src/data_manager.py, within get_db_connection() or similar
+    conn = sqlite3.connect(DB_NAME, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+    ```
+*   **Usage (Creating Timestamps):**
+    ```python
+    now = dt.datetime.now()
+    # Use 'now' in cursor.execute() for TIMESTAMP columns
+    ```
+*   **Schema Definition:** Ensure relevant columns in `CREATE TABLE` statements are defined with the `TIMESTAMP` type (e.g., `created_at TIMESTAMP NOT NULL`).

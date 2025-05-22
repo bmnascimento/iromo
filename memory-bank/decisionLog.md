@@ -114,3 +114,45 @@ This file records architectural and implementation decisions using a list format
 *   Specific log levels (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`) to be used appropriately.
 *   Code in `setup_logging()` to ensure log directory exists.
 *   (Mermaid diagram of logging flow included in LOGGING_IMPLEMENTATION_PLAN.md, see systemPatterns.md for visual representation)
+---
+2025-05-21 23:41:53 - Resolved sqlite3 datetime DeprecationWarnings.
+
+## Decision: Resolve `sqlite3` `DeprecationWarning`s for `datetime` handling.
+
+*   Address warnings related to deprecated default `datetime` object handling in `sqlite3` with Python 3.12+.
+
+## Rationale: Resolve `sqlite3` `DeprecationWarning`s.
+
+*   Ensure future compatibility of the application with newer Python versions.
+*   Adhere to `sqlite3` library best practices for type adaptation.
+*   Prevent potential runtime errors if the deprecated default behavior is removed.
+
+## Implementation Details: `sqlite3` `DeprecationWarning` Fix.
+
+*   **File Modified:** `src/data_manager.py`
+*   **Import Change:** Changed `from datetime import datetime` to `import datetime as dt`.
+*   **Adapter Function:** Defined `adapt_datetime_iso(datetime_obj)` to convert `dt.datetime` objects to ISO 8601 strings.
+    ```python
+    def adapt_datetime_iso(datetime_obj):
+        logger.debug(f"Adapting datetime: {datetime_obj} of type {type(datetime_obj)}")
+        return datetime_obj.isoformat()
+    ```
+*   **Converter Function:** Defined `convert_timestamp_iso(val_bytes)` to convert ISO 8601 strings (retrieved as bytes) back to `dt.datetime` objects.
+    ```python
+    def convert_timestamp_iso(val_bytes):
+        logger.debug(f"Converting timestamp bytes: {val_bytes} of type {type(val_bytes)}")
+        val_str = val_bytes.decode() if isinstance(val_bytes, bytes) else val_bytes
+        converted = dt.datetime.fromisoformat(val_str)
+        logger.debug(f"Converted to datetime: {converted} of type {type(converted)}")
+        return converted
+    ```
+*   **Registration:** Registered the adapter and converter globally for `sqlite3`.
+    ```python
+    sqlite3.register_adapter(dt.datetime, adapt_datetime_iso)
+    sqlite3.register_converter("timestamp", convert_timestamp_iso)
+    ```
+*   **Connection Update:** Modified `get_db_connection` to include `detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES`.
+    ```python
+    conn = sqlite3.connect(DB_NAME, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+    ```
+*   **Timestamp Creation:** Updated all instances of `datetime.now()` to `dt.datetime.now()`.

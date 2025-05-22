@@ -61,3 +61,9 @@ This file tracks the project's progress using a task list format.
 
 ---
 2025-05-21 22:48:22 - Updated tasks with MVP plan and marked Memory Bank initialization complete.
+---
+2025-05-21 23:41:53 - Updated after resolving sqlite3 datetime warnings.
+
+## Completed Tasks
+
+*   Debug and fix `sqlite3` `DeprecationWarning`s in `src/data_manager.py` related to `datetime` handling.

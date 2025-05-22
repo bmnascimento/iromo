@@ -1,7 +1,7 @@
 import sqlite3
 import uuid
 import os
-from datetime import datetime
+import datetime as dt
 import glob
 import logging
 
@@ -13,11 +13,30 @@ TEXT_FILES_DIR = "iromo_data/text_files"
 MIGRATIONS_DIR = "migrations" # Directory to store SQL migration files
 INITIAL_TITLE_LENGTH = 70
 
+# --- SQLite datetime handling ---
+def adapt_datetime_iso(datetime_obj):
+    """Adapt dt.datetime to timezone-naive ISO 8601 format."""
+    logger.debug(f"Adapting datetime: {datetime_obj} of type {type(datetime_obj)}")
+    return datetime_obj.isoformat()
+
+def convert_timestamp_iso(val_bytes):
+    """Convert ISO 8601 string (bytes) to dt.datetime object."""
+    logger.debug(f"Converting timestamp bytes: {val_bytes} of type {type(val_bytes)}")
+    # Ensure val_bytes is decoded if it's bytes
+    val_str = val_bytes.decode() if isinstance(val_bytes, bytes) else val_bytes
+    converted = dt.datetime.fromisoformat(val_str)
+    logger.debug(f"Converted to datetime: {converted} of type {type(converted)}")
+    return converted
+
+sqlite3.register_adapter(dt.datetime, adapt_datetime_iso)
+sqlite3.register_converter("timestamp", convert_timestamp_iso)
+# --- End SQLite datetime handling ---
+
 # --- Database Connection & Initialization ---
 
 def get_db_connection():
     """Establishes and returns a connection to the SQLite database."""
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_NAME, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -47,7 +66,7 @@ def _apply_migrations(conn):
                     cursor.executescript(sql_script) # Use executescript for multi-statement SQL files
                 
                 cursor.execute("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
-                               (migration_filename, datetime.now()))
+                               (migration_filename, dt.datetime.now()))
                 conn.commit()
                 logger.info(f"Successfully applied migration: {migration_filename}")
             except sqlite3.Error as e:
@@ -105,7 +124,7 @@ def create_topic(text_content="", parent_id=None, custom_title=None):
     text_file_uuid_str = str(uuid.uuid4())
     text_file_path = os.path.join(TEXT_FILES_DIR, f"{text_file_uuid_str}.txt")
     
-    now = datetime.now()
+    now = dt.datetime.now()
     title = custom_title if custom_title else _generate_initial_title(text_content)
 
     try:
@@ -189,7 +208,7 @@ def save_topic_content(topic_id, content):
         return False
 
     text_file_path = _get_topic_text_file_path(row['text_file_uuid'])
-    now = datetime.now()
+    now = dt.datetime.now()
 
     try:
         with open(text_file_path, 'w', encoding='utf-8') as f:
@@ -217,7 +236,7 @@ def update_topic_title(topic_id, new_title):
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    now = datetime.now()
+    now = dt.datetime.now()
 
     try:
         cursor.execute("UPDATE topics SET title = ?, updated_at = ? WHERE id = ?", (new_title, now, topic_id))
@@ -284,7 +303,7 @@ def create_extraction(parent_topic_id, child_topic_id, start_char, end_char):
         """, (extraction_id, parent_topic_id, child_topic_id, start_char, end_char))
         
         # Also update the parent topic's updated_at timestamp
-        cursor.execute("UPDATE topics SET updated_at = ? WHERE id = ?", (datetime.now(), parent_topic_id))
+        cursor.execute("UPDATE topics SET updated_at = ? WHERE id = ?", (dt.datetime.now(), parent_topic_id))
 
         conn.commit()
         logger.info(f"Extraction from '{parent_topic_id}' to '{child_topic_id}' (ID: {extraction_id}) created successfully.")
