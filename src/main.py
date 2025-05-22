@@ -1,7 +1,7 @@
 import sys
 from PyQt6.QtWidgets import QApplication
-from main_window import MainWindow
-from logger_config import setup_logging, APP_NAME
+from .main_window import MainWindow
+from .logger_config import setup_logging, APP_NAME
 import logging
 
 def run_app():

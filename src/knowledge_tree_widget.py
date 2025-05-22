@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import QTreeView, QAbstractItemView
 from PyQt6.QtGui import QStandardItemModel, QStandardItem, QFont
 from PyQt6.QtCore import Qt, pyqtSignal
-import data_manager as dm
+from . import data_manager as dm
 import logging
 
 logger = logging.getLogger(__name__)

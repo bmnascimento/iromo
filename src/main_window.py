@@ -4,9 +4,9 @@ from PyQt6.QtWidgets import (QMainWindow, QApplication, QToolBar, QLabel,
 from PyQt6.QtGui import QAction
 from PyQt6.QtCore import Qt
 
-from knowledge_tree_widget import KnowledgeTreeWidget
-from topic_editor_widget import TopicEditorWidget
-import data_manager as dm # For initializing the database
+from .knowledge_tree_widget import KnowledgeTreeWidget
+from .topic_editor_widget import TopicEditorWidget
+from . import data_manager as dm # For initializing the database
 import logging
 
 logger = logging.getLogger(__name__)

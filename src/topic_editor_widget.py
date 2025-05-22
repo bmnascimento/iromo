@@ -3,7 +3,7 @@ from PyQt6.QtGui import QTextCursor, QColor, QTextCharFormat, QSyntaxHighlighter
 from PyQt6.QtCore import Qt, pyqtSignal
 import logging
 
-import data_manager as dm # Assuming data_manager.py is in the same src directory
+from . import data_manager as dm # Assuming data_manager.py is in the same src directory
 
 logger = logging.getLogger(__name__)
 
