@@ -40,6 +40,7 @@ class DataManager(QObject):
     topic_moved = pyqtSignal(str, str, str, int) # topic_id, new_parent_id, old_parent_id, new_display_order
     # Signal to indicate a full refresh might be needed, e.g., after migrations or complex ops
     data_changed_bulk = pyqtSignal()
+    shortcuts_changed = pyqtSignal() # Signal for shortcut changes
 
 
     def __init__(self, collection_base_path: str):
@@ -70,6 +71,35 @@ class DataManager(QObject):
         logger.info(f"DataManager initialized for collection: {self.collection_base_path}")
         logger.info(f"Database path: {self.db_path}")
         logger.info(f"Text files directory: {self.text_files_dir}")
+
+        self.default_shortcuts = {
+            "app.quit": "Ctrl+Q",
+            "app.preferences": "Ctrl+,",
+            "file.new_topic": "Ctrl+N",
+            "file.save_topic": "Ctrl+S", # Retained as per existing defaults
+            "file.open_collection": "Ctrl+O",
+            "file.new_collection": "Ctrl+Shift+N",
+            "file.close_collection": "Ctrl+Shift+W",
+            "edit.undo": "Ctrl+Z",
+            "edit.redo": "Ctrl+Shift+Z",
+            "edit.cut": "Ctrl+X",
+            "edit.copy": "Ctrl+C",
+            "edit.paste": "Ctrl+V",
+            "edit.delete": "Del",
+            "edit.select_all": "Ctrl+A",
+            "edit.extract_text": "Alt+X",
+            "view.toggle_knowledge_tree": "Ctrl+T",
+            "view.zoom_in": "Ctrl+=",
+            "view.zoom_out": "Ctrl+-",
+            "view.reset_zoom": "Ctrl+0",
+            "navigation.next_topic": "Alt+Right",
+            "navigation.previous_topic": "Alt+Left",
+            "topic.create_child_topic": "Ctrl+Enter",
+            "topic.edit_title": "F2",
+            "topic.delete_topic": "Shift+Del",
+            "help.about": "F1",
+            # Add more default shortcuts here as actions are defined
+        }
 
     def _get_db_connection(self):
         """Establishes and returns a connection to the SQLite database for the collection."""
@@ -498,100 +528,116 @@ class DataManager(QObject):
             
             deleted_infos_list = self._delete_topic_recursive(topic_id, conn)
             
-            if deleted_infos_list is not None:
-                all_deleted_topic_infos = deleted_infos_list
-                conn.commit()
-                logger.info(f"Successfully committed deletion of topic {topic_id} and its descendants. Total items processed for deletion: {len(all_deleted_topic_infos)}.")
-                for del_id, old_parent_id in all_deleted_topic_infos:
-                    self.topic_deleted.emit(del_id, old_parent_id)
-                return True
-            else:
-                conn.rollback()
-                logger.error(f"Failed to process deletion for topic {topic_id} or one of its descendants. Rolled back.")
+            if deleted_infos_list is None: # Deletion failed and was rolled back internally
+                conn.rollback() # Ensure rollback at this level too
+                logger.error(f"Recursive deletion failed for topic {topic_id}. Transaction rolled back.")
                 return False
-        except sqlite3.Error as e:
+
+            all_deleted_topic_infos.extend(deleted_infos_list)
+            conn.commit()
+            logger.info(f"Successfully deleted topic {topic_id} and its descendants. Transaction committed.")
+
+            # Emit signals after successful commit
+            for deleted_id, old_parent_id in all_deleted_topic_infos:
+                self.topic_deleted.emit(deleted_id, old_parent_id)
+            if all_deleted_topic_infos: # If anything was actually deleted
+                 self.data_changed_bulk.emit() # A more general signal indicating significant change
+
+            return True
+        except Exception as e:
             conn.rollback()
-            logger.error(f"Transaction error during delete_topic for {topic_id}: {e}")
+            logger.error(f"Error deleting topic {topic_id} in {self.collection_base_path}: {e}")
             return False
         finally:
             conn.close()
 
     def delete_extraction(self, extraction_id):
         """
-        Deletes an extraction record from the database.
+        Deletes a specific extraction record from the collection's database.
         Returns True on success, False on failure.
         """
         conn = self._get_db_connection()
         cursor = conn.cursor()
-        parent_topic_id_for_signal = None
+        parent_topic_id = None
         try:
-            # Get parent_topic_id for the signal before deleting
+            # First, get the parent_topic_id for the signal
             cursor.execute("SELECT parent_topic_id FROM extractions WHERE id = ?", (extraction_id,))
             row = cursor.fetchone()
             if row:
-                parent_topic_id_for_signal = row['parent_topic_id']
+                parent_topic_id = row['parent_topic_id']
+            else:
+                logger.warning(f"Extraction {extraction_id} not found for deletion.")
+                return False # Or True, if "not found" means "already deleted"
 
             cursor.execute("DELETE FROM extractions WHERE id = ?", (extraction_id,))
             if cursor.rowcount == 0:
-                logger.warning(f"Extraction {extraction_id} not found for deletion.")
-                return False
+                # This case might be redundant if the above fetch already confirmed existence
+                logger.warning(f"Extraction {extraction_id} not found during delete operation.")
+                conn.close()
+                return False # Or True, depending on desired semantics for "not found"
+            
             conn.commit()
-            logger.info(f"Extraction {extraction_id} deleted successfully.")
-            if parent_topic_id_for_signal:
-                self.extraction_deleted.emit(extraction_id, parent_topic_id_for_signal)
+            logger.info(f"Extraction '{extraction_id}' deleted successfully from {self.collection_base_path}.")
+            if parent_topic_id: # Only emit if we found the parent
+                self.extraction_deleted.emit(extraction_id, parent_topic_id)
             return True
-        except sqlite3.Error as e:
+        except Exception as e:
             conn.rollback()
-            logger.error(f"Error deleting extraction {extraction_id}: {e}")
+            logger.error(f"Error deleting extraction {extraction_id} from {self.collection_base_path}: {e}")
             return False
         finally:
             conn.close()
 
     def move_topic(self, topic_id, new_parent_id, new_display_order):
         """
-        Moves a topic to a new parent and/or updates its display order.
-        Args:
-            topic_id (str): The ID of the topic to move.
-            new_parent_id (str, optional): The ID of the new parent topic. Can be None for root topics.
-            new_display_order (int): The new display order for the topic under its parent.
-        Returns:
-            bool: True if the move was successful, False otherwise.
+        Moves a topic to a new parent and/or updates its display order among siblings.
+        Handles reordering of other siblings if necessary.
         """
         conn = self._get_db_connection()
         cursor = conn.cursor()
-        now = dt.datetime.now()
-        old_parent_id = None
+
         try:
-            # Get old_parent_id for the signal
-            cursor.execute("SELECT parent_id FROM topics WHERE id = ?", (topic_id,))
-            row = cursor.fetchone()
-            if row:
-                old_parent_id = row['parent_id']
-            else: # Topic not found
-                logger.error(f"Topic with ID {topic_id} not found for move operation.")
+            conn.execute("BEGIN") # Start transaction
+
+            # Get current parent and display order
+            cursor.execute("SELECT parent_id, display_order FROM topics WHERE id = ?", (topic_id,))
+            current_topic_info = cursor.fetchone()
+            if not current_topic_info:
+                logger.error(f"Topic {topic_id} not found for move operation.")
+                conn.rollback()
                 return False
+            
+            old_parent_id = current_topic_info['parent_id']
+            # old_display_order = current_topic_info['display_order'] # Not directly used here but good for logging/undo
 
+            # Update the target topic's parent and display order
+            cursor.execute("UPDATE topics SET parent_id = ?, display_order = ?, updated_at = ? WHERE id = ?",
+                           (new_parent_id, new_display_order, dt.datetime.now(), topic_id))
 
-            # Ensure topic_id is not being moved under itself or one of its descendants (prevent cycles)
-            # This is a more complex check, for now, we assume valid moves.
-            # A full check would involve traversing up from new_parent_id to ensure topic_id is not an ancestor.
-
+            # Re-normalize display_order for siblings under the new parent
+            # All items at or after new_display_order (excluding the one just moved) need to be shifted
             cursor.execute("""
                 UPDATE topics
-                SET parent_id = ?, display_order = ?, updated_at = ?
-                WHERE id = ?
-            """, (new_parent_id, new_display_order, now, topic_id))
+                SET display_order = display_order + 1
+                WHERE parent_id = ? AND id != ? AND display_order >= ?
+            """, (new_parent_id, topic_id, new_display_order))
             
-            if cursor.rowcount == 0:
-                # This case should ideally be caught by the select above, but as a safeguard
-                logger.error(f"Topic with ID {topic_id} not found for move operation (during update).")
-                return False
-            
+            # If the topic moved from a different parent, re-normalize display_order for old siblings
+            if old_parent_id != new_parent_id:
+                 cursor.execute("""
+                    UPDATE topics
+                    SET display_order = display_order - 1
+                    WHERE parent_id = ? AND display_order > ? 
+                 """, (old_parent_id, current_topic_info['display_order']))
+
+
             conn.commit()
-            logger.info(f"Topic {topic_id} moved to parent {new_parent_id} with display_order {new_display_order}.")
+            logger.info(f"Topic {topic_id} moved to parent {new_parent_id} at order {new_display_order}.")
             self.topic_moved.emit(topic_id, new_parent_id, old_parent_id, new_display_order)
+            self.data_changed_bulk.emit() # Moving can affect tree structure significantly
             return True
-        except sqlite3.Error as e:
+
+        except Exception as e:
             conn.rollback()
             logger.error(f"Error moving topic {topic_id}: {e}")
             return False
@@ -600,109 +646,173 @@ class DataManager(QObject):
 
     def _get_topic_and_descendants_recursive(self, topic_id, conn, collected_topics_details):
         """
-        Internal recursive helper to fetch details of a topic and all its descendants.
-        Details include topic data and content.
+        Recursively fetches a topic and all its descendants' details.
+        `collected_topics_details` is a list that this function appends to.
         """
         cursor = conn.cursor()
         
-        # Get details for the current topic
-        topic_details = self.get_topic_details(topic_id) # Uses its own connection, fine for reads
-        if not topic_details:
-            logger.warning(f"_get_topic_and_descendants_recursive: Topic {topic_id} not found.")
-            return
+        # Fetch the current topic's details
+        cursor.execute("""
+            SELECT id, parent_id, title, text_file_uuid, created_at, updated_at, display_order
+            FROM topics WHERE id = ?
+        """, (topic_id,))
+        topic_details = cursor.fetchone()
         
-        topic_content = self.get_topic_content(topic_id) # Uses its own connection
-        topic_details['content'] = topic_content if topic_content is not None else "" # Ensure content is always a string
-        
-        # Store details, ensuring no duplicates if called multiple times for same ID (though shouldn't happen with tree traversal)
-        # The list stores them in a pre-order traversal, which is good for restoration (parents before children).
-        if not any(t['id'] == topic_id for t in collected_topics_details):
-             collected_topics_details.append(topic_details)
-
-        # Get children and recurse
-        cursor.execute("SELECT id FROM topics WHERE parent_id = ? ORDER BY display_order, created_at", (topic_id,))
-        children_ids = [row['id'] for row in cursor.fetchall()]
-        
-        for child_id in children_ids:
-            self._get_topic_and_descendants_recursive(child_id, conn, collected_topics_details)
+        if topic_details:
+            collected_topics_details.append(dict(topic_details))
+            
+            # Fetch children of the current topic
+            cursor.execute("SELECT id FROM topics WHERE parent_id = ? ORDER BY display_order", (topic_id,))
+            children = cursor.fetchall()
+            for child_row in children:
+                self._get_topic_and_descendants_recursive(child_row['id'], conn, collected_topics_details)
 
     def get_topic_and_all_descendants_details(self, topic_id):
         """
-        Retrieves full details (including content) for a given topic_id and all its descendants.
-        This is useful for operations like delete/undo that need to preserve the entire subtree.
-        Returns a list of dictionaries, where each dictionary contains details for one topic.
-        The list is ordered such that parents appear before their children.
+        Retrieves details for a given topic and all its descendants.
+        This is useful for operations like exporting or duplicating a branch of the tree.
+        Returns a list of dictionaries, each representing a topic's data.
+        The list is ordered such that parents appear before their children (depth-first).
         """
-        collected_topics = []
         conn = self._get_db_connection()
+        all_details = []
         try:
-            self._get_topic_and_descendants_recursive(topic_id, conn, collected_topics)
-            return collected_topics
-        except sqlite3.Error as e:
+            self._get_topic_and_descendants_recursive(topic_id, conn, all_details)
+            return all_details
+        except Exception as e:
             logger.error(f"Error fetching topic and descendants details for {topic_id}: {e}")
             return [] # Return empty list on error
         finally:
+            if conn:
+                conn.close()
+
+    # --- Shortcut Management Methods ---
+
+    def get_default_shortcuts(self) -> dict:
+        """Returns the predefined default shortcuts."""
+        return self.default_shortcuts.copy()
+
+    def get_custom_shortcut(self, action_id: str) -> str | None:
+        """
+        Retrieves a custom shortcut for a given action_id from the database.
+        Returns the shortcut string or None if not found.
+        """
+        conn = self._get_db_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT shortcut FROM shortcuts WHERE action_id = ?", (action_id,))
+            row = cursor.fetchone()
+            return row['shortcut'] if row else None
+        except sqlite3.Error as e:
+            logger.error(f"Error fetching custom shortcut for {action_id} from {self.db_path}: {e}")
+            return None
+        finally:
             conn.close()
 
-# if __name__ == '__main__':
-#     # This block is for illustrative purposes or direct testing of DataManager.
-#     # In the actual application, DataManager will be instantiated by other modules.
-    
-#     # Create a dummy collection path for testing
-#     test_collection_dir = "temp_test_iromo_collection"
-#     if not os.path.exists(test_collection_dir):
-#         os.makedirs(test_collection_dir)
-    
-#     # Create a dummy migrations directory and a dummy migration file if they don't exist
-#     # This is just to allow the test code to run without erroring on missing migrations.
-#     # In a real scenario, migrations are part of the application.
-#     if not os.path.exists(MIGRATIONS_DIR):
-#         os.makedirs(MIGRATIONS_DIR)
-#         logger.info(f"Created dummy migrations directory: {MIGRATIONS_DIR}")
-    
-#     dummy_migration_file = os.path.join(MIGRATIONS_DIR, "000_dummy_test_migration.sql")
-#     if not os.path.exists(dummy_migration_file):
-#         with open(dummy_migration_file, "w") as f:
-#             f.write("-- Dummy migration for testing DataManager directly")
-#         logger.info(f"Created dummy migration file: {dummy_migration_file}")
+    def get_all_custom_shortcuts(self) -> dict:
+        """
+        Retrieves all custom shortcuts from the database.
+        Returns a dictionary of {action_id: shortcut}.
+        """
+        conn = self._get_db_connection()
+        cursor = conn.cursor()
+        custom_shortcuts = {}
+        try:
+            cursor.execute("SELECT action_id, shortcut FROM shortcuts")
+            for row in cursor.fetchall():
+                custom_shortcuts[row['action_id']] = row['shortcut']
+            return custom_shortcuts
+        except sqlite3.Error as e:
+            logger.error(f"Error fetching all custom shortcuts from {self.db_path}: {e}")
+            return {}
+        finally:
+            conn.close()
 
+    def get_shortcut(self, action_id: str) -> str | None:
+        """
+        Gets the current shortcut for an action.
+        Returns the custom shortcut if it exists, otherwise the default shortcut.
+        Returns None if the action_id is not recognized (has no default).
+        """
+        custom_shortcut = self.get_custom_shortcut(action_id)
+        if custom_shortcut:
+            return custom_shortcut
+        return self.default_shortcuts.get(action_id)
 
-#     logger.info(f"Attempting to initialize DataManager for test collection: {test_collection_dir}")
-#     try:
-#         dm = DataManager(collection_base_path=os.path.abspath(test_collection_dir))
-#         logger.info(f"DataManager initialized. DB path: {dm.db_path}")
-        
-#         logger.info("Attempting to initialize collection storage (DB and text files dir)...")
-#         dm.initialize_collection_storage() # This will create DB and apply migrations
-#         logger.info("Collection storage initialization complete.")
+    def get_all_shortcuts(self) -> dict:
+        """
+        Gets all currently active shortcuts, merging defaults with user customizations.
+        User customizations override defaults.
+        """
+        active_shortcuts = self.default_shortcuts.copy()
+        custom_shortcuts = self.get_all_custom_shortcuts()
+        active_shortcuts.update(custom_shortcuts)
+        return active_shortcuts
 
-#         # Example usage (optional, for testing):
-#         # logger.info("\n--- Running manual tests for DataManager methods ---")
-#         # test_topic_id = dm.create_topic(text_content="Initial content for testing.", custom_title="Test Topic")
-#         # if test_topic_id:
-#         #     logger.info(f"Created test topic with ID: {test_topic_id}")
-#         #     content = dm.get_topic_content(test_topic_id)
-#         #     logger.info(f"Content of test topic: {content}")
-#         #     dm.save_topic_content(test_topic_id, "Updated content for test topic.")
-#         #     updated_content = dm.get_topic_content(test_topic_id)
-#         #     logger.info(f"Updated content: {updated_content}")
-#         #     dm.update_topic_title(test_topic_id, "Test Topic - Updated Title")
-#         #     hierarchy = dm.get_topic_hierarchy()
-#         #     logger.info(f"Topic hierarchy: {hierarchy}")
-#         # else:
-#         #     logger.error("Failed to create test topic.")
+    def set_shortcut(self, action_id: str, shortcut: str) -> bool:
+        """
+        Sets or updates a user-customized shortcut for an action.
+        Returns True on success, False on failure.
+        """
+        conn = self._get_db_connection()
+        cursor = conn.cursor()
+        try:
+            # Using INSERT OR REPLACE to simplify logic for new vs existing shortcuts
+            cursor.execute("""
+                INSERT INTO shortcuts (action_id, shortcut) VALUES (?, ?)
+                ON CONFLICT(action_id) DO UPDATE SET shortcut = excluded.shortcut
+            """, (action_id, shortcut))
+            conn.commit()
+            logger.info(f"Shortcut for action '{action_id}' set to '{shortcut}' in {self.db_path}.")
+            self.shortcuts_changed.emit()
+            return True
+        except sqlite3.Error as e:
+            conn.rollback()
+            logger.error(f"Error setting shortcut for {action_id} to {shortcut} in {self.db_path}: {e}")
+            return False
+        finally:
+            conn.close()
 
-#     except Exception as e:
-#         logger.error(f"Error during DataManager direct test: {e}")
-#     finally:
-#         # Clean up the dummy collection directory after test
-#         # import shutil
-#         # if os.path.exists(test_collection_dir):
-#         #     logger.info(f"Removing test collection directory: {test_collection_dir}")
-#         #     shutil.rmtree(test_collection_dir)
-#         # if os.path.exists(dummy_migration_file): # Clean up dummy migration
-#         #     os.remove(dummy_migration_file)
-#         # if os.path.exists(MIGRATIONS_DIR) and not os.listdir(MIGRATIONS_DIR): # Clean up dummy migrations dir if empty
-#         #     os.rmdir(MIGRATIONS_DIR)
-#         logger.info("--- DataManager direct test finished ---")
-#         pass
+    def reset_shortcut(self, action_id: str) -> bool:
+        """
+        Resets a specific action's shortcut to its default by removing the custom setting.
+        Returns True if a custom shortcut was removed or if no custom shortcut existed,
+        False on database error.
+        """
+        conn = self._get_db_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("DELETE FROM shortcuts WHERE action_id = ?", (action_id,))
+            conn.commit()
+            if cursor.rowcount > 0:
+                logger.info(f"Custom shortcut for action '{action_id}' reset in {self.db_path}.")
+            else:
+                logger.info(f"No custom shortcut to reset for action '{action_id}' in {self.db_path}.")
+            self.shortcuts_changed.emit() # Emit even if no custom shortcut was present, as the "effective" shortcut might change
+            return True
+        except sqlite3.Error as e:
+            conn.rollback()
+            logger.error(f"Error resetting shortcut for {action_id} in {self.db_path}: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def reset_all_shortcuts(self) -> bool:
+        """
+        Resets all user-customized shortcuts to their defaults by clearing the shortcuts table.
+        Returns True on success, False on failure.
+        """
+        conn = self._get_db_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("DELETE FROM shortcuts")
+            conn.commit()
+            logger.info(f"All custom shortcuts have been reset in {self.db_path}.")
+            self.shortcuts_changed.emit()
+            return True
+        except sqlite3.Error as e:
+            conn.rollback()
+            logger.error(f"Error resetting all shortcuts in {self.db_path}: {e}")
+            return False
+        finally:
+            conn.close()

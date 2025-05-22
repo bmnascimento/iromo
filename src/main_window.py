@@ -3,8 +3,8 @@ import logging
 import os
 import sys
 
-from PyQt6.QtCore import QSettings, Qt
-from PyQt6.QtGui import QAction, QKeySequence
+from PyQt6.QtCore import QSettings, Qt, QTimer
+from PyQt6.QtGui import QAction, QKeySequence, QFont, QFontDatabase
 from PyQt6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -13,20 +13,19 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QSplitter,
     QToolBar,
-    QVBoxLayout,
-    QWidget,
 )
 
 from .commands.topic_commands import (
     ChangeTopicTitleCommand,
     CreateTopicCommand,
     ExtractTextCommand,
-    SaveTopicContentCommand,
 )
 from .data_manager import DB_FILENAME, TEXT_FILES_SUBDIR, DataManager
 from .knowledge_tree_widget import KnowledgeTreeWidget
 from .topic_editor_widget import TopicEditorWidget
 from .undo_manager import UndoManager
+from .settings_dialog import SettingsDialog
+from .logger_config import setup_logging # For log level changes
 # Import MoveTopicCommand when tree reordering is implemented
 logger = logging.getLogger(__name__)
 APP_ORGANIZATION_NAME = "IromoOrg" # For QSettings
@@ -40,18 +39,26 @@ class MainWindow(QMainWindow):
         self.data_manager = None
         self.active_collection_path = None
         self.undo_manager = UndoManager(self)
+        self.actions_map = {} # For managing QActions and their shortcuts
 
         self.setWindowTitle(f"{APP_NAME} - No Collection Open")
         self.setGeometry(100, 100, 1024, 768)
 
-        self._create_menu_bar()
-        self._create_tool_bar()
+        self._create_menu_bar() # Populates self.actions_map with initial QActions and default shortcuts
+        self._create_tool_bar() # Adds to self.actions_map
         self._setup_central_widget()
         self._connect_signals() # UndoManager signals connected here
+        self.autosave_timer = QTimer(self) # For autosave functionality
         
-        self._update_ui_for_collection_state() # Initial UI state
+        self._update_ui_for_collection_state() # Initial UI state (enables/disables actions)
         self.undo_manager._update_signals() # Ensure initial state of undo/redo actions
-        self._try_load_last_collection()
+        self._apply_initial_settings() # Apply settings on startup
+        self._try_load_last_collection() # This might load a DM and trigger shortcut updates via _open_collection
+        
+        # If no collection is loaded by _try_load_last_collection,
+        # the shortcuts remain as set in _create_menu_bar and _create_tool_bar.
+        # If a collection is loaded, _open_collection calls _update_all_action_shortcuts
+        # which will then apply DM-managed shortcuts.
         self.undo_manager.command_executed.connect(self._handle_command_executed)
 
     def _create_menu_bar(self):
@@ -60,64 +67,88 @@ class MainWindow(QMainWindow):
 
         new_collection_action = QAction("&New Collection...", self)
         new_collection_action.triggered.connect(self._handle_new_collection)
+        new_collection_action.setShortcut(QKeySequence("Ctrl+Shift+N")) # Initial default
         file_menu.addAction(new_collection_action)
+        self.actions_map["file.new_collection"] = new_collection_action
 
         open_collection_action = QAction("&Open Collection...", self)
         open_collection_action.triggered.connect(self._handle_open_collection)
+        open_collection_action.setShortcut(QKeySequence("Ctrl+O")) # Initial default
         file_menu.addAction(open_collection_action)
+        self.actions_map["file.open_collection"] = open_collection_action
 
         self.close_collection_action = QAction("&Close Collection", self)
         self.close_collection_action.triggered.connect(self._handle_close_collection)
+        self.close_collection_action.setShortcut(QKeySequence("Ctrl+Shift+W")) # Initial default
         file_menu.addAction(self.close_collection_action)
+        self.actions_map["file.close_collection"] = self.close_collection_action
         
         file_menu.addSeparator()
 
         self.new_topic_action = QAction("&New Topic", self)
         self.new_topic_action.triggered.connect(self._handle_new_topic_action)
+        self.new_topic_action.setShortcut(QKeySequence("Ctrl+N")) # Initial default
         file_menu.addAction(self.new_topic_action)
-
-        # self.save_content_action = QAction("&Save Content", self) # Removed
-        # self.save_content_action.triggered.connect(self.save_current_topic_content) # Removed
-        # file_menu.addAction(self.save_content_action) # Removed
+        self.actions_map["file.new_topic"] = self.new_topic_action
         
         file_menu.addSeparator()
         exit_action = QAction("&Exit", self)
         exit_action.triggered.connect(self.close) # QMainWindow.close
+        exit_action.setShortcut(QKeySequence("Ctrl+Q")) # Initial default
         file_menu.addAction(exit_action)
+        self.actions_map["app.quit"] = exit_action
 
         edit_menu = menu_bar.addMenu("&Edit")
 
         self.undo_action = QAction("Undo", self)
-        self.undo_action.setShortcut(QKeySequence.StandardKey.Undo) # Ctrl+Z
+        self.undo_action.setShortcut(QKeySequence.StandardKey.Undo) # Default, will be managed by DM
         self.undo_action.triggered.connect(self.undo_manager.undo)
         edit_menu.addAction(self.undo_action)
+        self.actions_map["edit.undo"] = self.undo_action
 
         self.redo_action = QAction("Redo", self)
-        self.redo_action.setShortcut(QKeySequence.StandardKey.Redo) # Ctrl+Y (Windows/Linux), Shift+Ctrl+Z (macOS)
+        self.redo_action.setShortcut(QKeySequence.StandardKey.Redo) # Default, will be managed by DM
         self.redo_action.triggered.connect(self.undo_manager.redo)
         edit_menu.addAction(self.redo_action)
+        self.actions_map["edit.redo"] = self.redo_action
 
         edit_menu.addSeparator()
-        # Add other edit actions like Cut, Copy, Paste here if needed
-
+        
+        self.preferences_action = QAction("Preferences...", self) # Made it self.
+        if sys.platform == "darwin":
+            self.preferences_action.setMenuRole(QAction.MenuRole.PreferencesRole)
+            edit_menu.addAction(self.preferences_action) # Keep in Edit for consistency for now
+        else: # Windows/Linux
+            edit_menu.addAction(self.preferences_action)
+        self.preferences_action.triggered.connect(self.open_settings_dialog)
+        self.preferences_action.setShortcut(QKeySequence("Ctrl+,")) # Initial default
+        self.actions_map["app.preferences"] = self.preferences_action
+        
         view_menu = menu_bar.addMenu("&View")
+        # Example for a view action if it were to be added:
+        # self.toggle_tree_action = QAction("Toggle Knowledge Tree", self)
+        # self.toggle_tree_action.setShortcut(QKeySequence("Ctrl+T")) # Initial default
+        # view_menu.addAction(self.toggle_tree_action)
+        # self.actions_map["view.toggle_knowledge_tree"] = self.toggle_tree_action
+
+
         help_menu = menu_bar.addMenu("&Help")
         about_action = QAction("&About", self)
+        about_action.setShortcut(QKeySequence("F1")) # Initial default
         help_menu.addAction(about_action)
+        self.actions_map["help.about"] = about_action
 
     def _create_tool_bar(self):
         toolbar = QToolBar("Main Toolbar")
         self.addToolBar(toolbar)
 
-        self.extract_action_toolbar = QAction("Extract (Alt+X)", self)
+        self.extract_action_toolbar = QAction("Extract", self) # Name updated for consistency
         self.extract_action_toolbar.triggered.connect(self.extract_text)
-        self.extract_action_toolbar.setShortcut("Alt+X")
-        self.addAction(self.extract_action_toolbar) # Add shortcut to window context
+        # Initial shortcut set here, will be managed by _update_all_action_shortcuts
+        self.extract_action_toolbar.setShortcut(QKeySequence("Alt+X"))
+        self.addAction(self.extract_action_toolbar)
         toolbar.addAction(self.extract_action_toolbar)
-
-        # self.save_content_action_toolbar = QAction("Save Content", self) # Removed
-        # self.save_content_action_toolbar.triggered.connect(self.save_current_topic_content) # Removed
-        # toolbar.addAction(self.save_content_action_toolbar) # Removed
+        self.actions_map["edit.extract_text"] = self.extract_action_toolbar
 
     def _setup_central_widget(self):
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -168,15 +199,24 @@ class MainWindow(QMainWindow):
     def _update_ui_for_collection_state(self):
         collection_open = self.data_manager is not None
         
-        self.close_collection_action.setEnabled(collection_open)
-        self.new_topic_action.setEnabled(collection_open)
-        # self.save_content_action.setEnabled(collection_open) # Removed
-        # self.save_content_action_toolbar.setEnabled(collection_open) # Removed
-        self.extract_action_toolbar.setEnabled(collection_open)
+        # Actions that require a collection to be open
+        if hasattr(self, 'close_collection_action'): # Ensure actions are created
+            self.close_collection_action.setEnabled(collection_open)
+        if hasattr(self, 'new_topic_action'):
+            self.new_topic_action.setEnabled(collection_open)
+        if hasattr(self, 'extract_action_toolbar'):
+            self.extract_action_toolbar.setEnabled(collection_open)
+        if hasattr(self, 'preferences_action'):
+            self.preferences_action.setEnabled(collection_open) # SettingsDialog now requires DataManager
+
+        # Undo/Redo are enabled/disabled by UndoManager's signals directly,
+        # but also depend on collection state for initial setup.
+        if hasattr(self, 'undo_action'): # Check if undo_action exists
+            self.undo_action.setEnabled(collection_open and self.undo_manager.can_undo())
+        if hasattr(self, 'redo_action'): # Check if redo_action exists
+            self.redo_action.setEnabled(collection_open and self.undo_manager.can_redo())
         
         if not collection_open:
-            self.undo_action.setEnabled(False)
-            self.redo_action.setEnabled(False)
             self.tree_widget.clear_tree()
             if self.editor_widget: # Ensure editor widget exists before clearing
                 self.editor_widget.clear_content()
@@ -305,11 +345,15 @@ class MainWindow(QMainWindow):
             self.data_manager.extraction_deleted.connect(self._on_dm_extraction_deleted)
             self.data_manager.topic_moved.connect(self._on_dm_topic_moved)
             self.data_manager.data_changed_bulk.connect(self._on_dm_data_changed_bulk)
+            self.data_manager.shortcuts_changed.connect(self._update_all_action_shortcuts)
+
 
             # Load data into UI
             self.tree_widget.load_tree_data(self.data_manager)
             self.editor_widget.clear_content()
             self.undo_manager.clear_stacks()
+            
+            self._update_all_action_shortcuts() # Apply shortcuts for this collection
 
             self._save_last_collection_path(collection_path)
             logger.info(f"Successfully opened collection: {collection_path}")
@@ -326,6 +370,7 @@ class MainWindow(QMainWindow):
                     self.data_manager.extraction_deleted.disconnect(self._on_dm_extraction_deleted)
                     self.data_manager.topic_moved.disconnect(self._on_dm_topic_moved)
                     self.data_manager.data_changed_bulk.disconnect(self._on_dm_data_changed_bulk)
+                    self.data_manager.shortcuts_changed.disconnect(self._update_all_action_shortcuts)
                 except TypeError: # Signals might not be connected if DM init failed early
                     pass
             self.data_manager = None
@@ -354,8 +399,9 @@ class MainWindow(QMainWindow):
                 self.data_manager.extraction_deleted.disconnect(self._on_dm_extraction_deleted)
                 self.data_manager.topic_moved.disconnect(self._on_dm_topic_moved)
                 self.data_manager.data_changed_bulk.disconnect(self._on_dm_data_changed_bulk)
-            except TypeError: # Signals might not be connected if DM init failed early or already disconnected
-                logger.warning("Error disconnecting DataManager signals, possibly already disconnected or never connected.")
+                self.data_manager.shortcuts_changed.disconnect(self._update_all_action_shortcuts)
+            except TypeError:
+                logger.warning("Error disconnecting DataManager signals during close, possibly already disconnected or never connected.")
                 pass
 
 
@@ -364,7 +410,38 @@ class MainWindow(QMainWindow):
         self._save_last_collection_path(None) # Clear last opened path
         self.undo_manager.clear_stacks()
         self._update_ui_for_collection_state()
+        # Shortcuts will remain as they were from the last collection.
+        # Or, if we want to revert to app defaults: self._update_all_action_shortcuts()
+        # but this method currently does nothing if self.data_manager is None.
+        # For now, they persist, which is acceptable.
 
+
+    # --- Shortcut Management ---
+
+    def _update_all_action_shortcuts(self):
+        if not self.data_manager:
+            # This means initial app state shortcuts (hardcoded or StandardKey) remain.
+            # When a DM becomes active, they will be updated.
+            logger.debug("_update_all_action_shortcuts: No DataManager, skipping dynamic update from DM.")
+            return
+
+        logger.info("Updating all action shortcuts from DataManager...")
+        for action_id, action in self.actions_map.items():
+            if not action:
+                logger.warning(f"No action found for action_id '{action_id}' in actions_map.")
+                continue
+
+            shortcut_str = self.data_manager.get_shortcut(action_id)
+            # get_shortcut returns custom, then default from DM's self.default_shortcuts,
+            # then None if action_id is not in DM's defaults.
+            
+            target_sequence = QKeySequence(shortcut_str if shortcut_str is not None else "")
+
+            if action.shortcut() != target_sequence:
+                logger.info(f"Setting shortcut for '{action_id}': '{target_sequence.toString()}' (was: '{action.shortcut().toString()}')")
+                action.setShortcut(target_sequence)
+            # else:
+                # logger.debug(f"Shortcut for '{action_id}' is already '{target_sequence.toString()}'. No change.")
 
     # --- Command Execution Handlers & Signal Handlers ---
 
@@ -549,6 +626,156 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"Error executing Extract Text command: {e}", exc_info=True)
             QMessageBox.critical(self, "Extraction Error", f"Could not extract text: {e}")
+
+    # --- Settings Dialog and Handlers ---
+
+    def open_settings_dialog(self):
+        dialog = SettingsDialog(self.data_manager, self)
+        # Connect signals from the dialog to MainWindow handlers
+        dialog.theme_changed.connect(self.handle_theme_changed)
+        dialog.editor_font_changed.connect(self.handle_editor_font_changed)
+        dialog.tree_font_changed.connect(self.handle_tree_font_changed)
+        dialog.extraction_highlight_color_changed.connect(self.handle_extraction_highlight_color_changed)
+        # dialog.default_collection_path_changed.connect(self.handle_default_collection_path_changed) # Not directly applied, but good to know
+        dialog.autosave_interval_changed.connect(self.handle_autosave_interval_changed)
+        # dialog.recent_collections_count_changed.connect(self.handle_recent_collections_count_changed) # UI for this is in File menu, not directly applied here
+        # dialog.default_topic_title_length_changed.connect(self.handle_default_topic_title_length_changed) # Used by DataManager
+        # dialog.confirm_topic_deletion_changed.connect(self.handle_confirm_topic_deletion_changed) # Used before delete operations
+        # dialog.open_last_collection_on_startup_changed.connect(self.handle_open_last_collection_on_startup_changed) # Affects startup
+        # dialog.show_welcome_on_startup_changed.connect(self.handle_show_welcome_on_startup_changed) # Affects startup
+        dialog.log_level_changed.connect(self.handle_log_level_changed)
+
+        if dialog.exec(): # User clicked OK
+            logger.info("Settings dialog accepted.")
+            # Settings are applied via signals or by the dialog's apply_settings method.
+            # If any settings need re-application after OK that aren't covered by signals, do it here.
+        else:
+            logger.info("Settings dialog cancelled.")
+            # Optionally, revert any previewed changes if the dialog supported live preview + cancel.
+            # For this dialog, Apply or OK saves, Cancel discards.
+
+    def _apply_initial_settings(self):
+        logger.info("Applying initial settings...")
+        settings = QSettings(APP_ORGANIZATION_NAME, APP_NAME)
+
+        theme = settings.value("ui/theme", "System Default")
+        self.handle_theme_changed(theme)
+
+        default_editor_font_family = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont).family()
+        editor_font_family = settings.value("ui/editor_font_family", default_editor_font_family)
+        editor_font_size = settings.value("ui/editor_font_size", 12, type=int)
+        self.handle_editor_font_changed(editor_font_family, editor_font_size)
+
+        default_tree_font_family = QApplication.font().family()
+        tree_font_family = settings.value("ui/tree_font_family", default_tree_font_family)
+        tree_font_size = settings.value("ui/tree_font_size", 10, type=int)
+        self.handle_tree_font_changed(tree_font_family, tree_font_size)
+
+        extraction_color = settings.value("ui/extraction_highlight_color", "#ADD8E6")
+        self.handle_extraction_highlight_color_changed(extraction_color)
+
+        log_level = settings.value("logging/log_level", "INFO")
+        self.handle_log_level_changed(log_level)
+        
+        autosave_interval_minutes = settings.value("data/autosave_interval_minutes", 5, type=int)
+        self.handle_autosave_interval_changed(autosave_interval_minutes)
+        
+        # Other settings like default_collection_path, recent_collections_count, etc.,
+        # are used by specific parts of the application (e.g., file dialogs, startup logic)
+        # and don't require direct application to visual components here.
+        logger.info("Initial settings applied.")
+
+    def handle_theme_changed(self, theme_name: str):
+        logger.info(f"Applying theme: {theme_name}")
+        # Placeholder for theme application logic
+        # This might involve:
+        # - Loading a QSS stylesheet:
+        #   with open(f"themes/{theme_name.lower()}.qss", "r") as f:
+        #       self.setStyleSheet(f.read())
+        # - Or using a library like qt_material:
+        #   if theme_name == "Dark":
+        #       apply_stylesheet(app, theme='dark_teal.xml')
+        #   elif theme_name == "Light":
+        #       apply_stylesheet(app, theme='light_blue.xml')
+        #   else: # System Default
+        #       app.setStyleSheet("") # Clear stylesheet
+        # For now, just log.
+        if theme_name == "Dark":
+            # Example: self.setStyleSheet("QWidget { background-color: #333; color: white; }")
+            pass
+        elif theme_name == "Light":
+            # Example: self.setStyleSheet("QWidget { background-color: #EEE; color: black; }")
+            pass
+        else: # System Default
+            # Example: self.setStyleSheet("")
+            pass
+        QApplication.instance().setProperty("theme", theme_name) # Store for other components if needed
+
+
+    def handle_editor_font_changed(self, font_family: str, font_size: int):
+        logger.info(f"Applying editor font: {font_family}, {font_size}pt")
+        if self.editor_widget and hasattr(self.editor_widget, 'set_font'):
+            font = QFont(font_family, font_size)
+            self.editor_widget.set_font(font)
+        else:
+            logger.warning("Editor widget not available or does not support set_font.")
+
+    def handle_tree_font_changed(self, font_family: str, font_size: int):
+        logger.info(f"Applying tree view font: {font_family}, {font_size}pt")
+        if self.tree_widget and hasattr(self.tree_widget, 'set_font'):
+            font = QFont(font_family, font_size)
+            self.tree_widget.set_font(font) # Assumes tree_widget has set_font
+        else:
+            logger.warning("Tree widget not available or does not support set_font.")
+
+    def handle_extraction_highlight_color_changed(self, color_str: str):
+        logger.info(f"Applying extraction highlight color: {color_str}")
+        if self.editor_widget and hasattr(self.editor_widget, 'set_extraction_highlight_color'):
+            self.editor_widget.set_extraction_highlight_color(color_str)
+        else:
+            logger.warning("Editor widget not available or does not support set_extraction_highlight_color.")
+        # This color might also be needed by DataManager or other parts if they render highlights.
+
+    def handle_log_level_changed(self, level_str: str):
+        logger.info(f"Updating log level to: {level_str}")
+        # Assuming setup_logging can be called again or there's a specific function to update level
+        # This might require reconfiguring the root logger or specific application loggers.
+        # For a simple case, if setup_logging configures the root logger:
+        try:
+            # This is a simplified approach. A robust solution might involve
+            # getting the root logger and setting its level, or specific handlers.
+            log_level_enum = getattr(logging, level_str.upper(), logging.INFO)
+            logging.getLogger().setLevel(log_level_enum) # Set root logger level
+            # If you have specific handlers, you might need to iterate and set their levels too.
+            for handler in logging.getLogger().handlers:
+                handler.setLevel(log_level_enum)
+            logger.info(f"Log level set to {level_str} in logging module.")
+        except Exception as e:
+            logger.error(f"Failed to update log level: {e}", exc_info=True)
+
+
+    def handle_autosave_interval_changed(self, interval_minutes: int):
+        logger.info(f"Updating autosave interval to: {interval_minutes} minutes")
+        if self.autosave_timer.isActive():
+            self.autosave_timer.stop()
+        
+        if interval_minutes > 0:
+            self.autosave_timer.setInterval(interval_minutes * 60 * 1000) # milliseconds
+            if not self.autosave_timer.receivers(self.autosave_timer.timeout): # Check if already connected
+                self.autosave_timer.timeout.connect(self._perform_autosave)
+            self.autosave_timer.start()
+            logger.info(f"Autosave timer started with interval {interval_minutes} minutes.")
+        else:
+            logger.info("Autosave disabled.")
+
+    def _perform_autosave(self):
+        if self.data_manager and self.editor_widget and \
+           self.editor_widget.current_topic_id and self.editor_widget.is_dirty():
+            logger.info(f"Autosaving content for topic: {self.editor_widget.current_topic_id}")
+            # Use the force_save_if_dirty method which encapsulates the save logic
+            self.editor_widget.force_save_if_dirty(wait_for_completion=False) # Non-blocking for autosave
+        else:
+            logger.info("Autosave triggered, but no dirty content to save or no topic open.")
 
     # --- DataManager Signal Handlers ---
 

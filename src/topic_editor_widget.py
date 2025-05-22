@@ -15,6 +15,7 @@ from PyQt6.QtGui import (
     QTextCharFormat,
     QTextCursor,
     QFocusEvent, # Added QFocusEvent
+    QPalette,
 )
 from PyQt6.QtWidgets import QApplication, QTextEdit, QToolBar, QVBoxLayout, QWidget
 
@@ -62,6 +63,7 @@ class TopicEditorWidget(QWidget): # Changed from QTextEdit to QWidget
         self._is_dirty = False      # True if content has changed since last load/save
         self.save_thread = None
         self.save_worker = None
+        self._extraction_highlight_color = QColor("#A7D8DE") # Default highlight color
 
         self._setup_ui()
         # self._setup_auto_save_timer() # REMOVED
@@ -393,7 +395,7 @@ class TopicEditorWidget(QWidget): # Changed from QTextEdit to QWidget
         
         return selected_text, start_offset, end_offset - 1 # end_offset is exclusive, so -1 for inclusive
 
-    def apply_extraction_highlight(self, start_char, end_char, color=QColor("lightblue")):
+    def apply_extraction_highlight(self, start_char, end_char):
         doc_text_before_highlight = self._get_document_text_for_logging()
         doc_len = len(self.editor.toPlainText()) # Use self.editor
         logger.debug(f"apply_extraction_highlight: START. For topic {self.current_topic_id}. Input start={start_char}, end={end_char}. Doc len: {doc_len}. Doc text: '{doc_text_before_highlight}'")
@@ -423,10 +425,12 @@ class TopicEditorWidget(QWidget): # Changed from QTextEdit to QWidget
             # For now, keeping it for debugging.
             logger.warning(f"apply_extraction_highlight: Selection mismatch! Expected sel_start={start_char}, sel_end={selection_end_pos}. Got actual_sel_start={cursor.selectionStart()}, actual_sel_end={cursor.selectionEnd()}. This might be due to HTML vs PlainText offset differences.")
 
+        highlight_color = getattr(self, '_extraction_highlight_color', QColor("#A7D8DE"))
         char_format = QTextCharFormat()
-        char_format.setBackground(color)
+        char_format.setBackground(highlight_color)
+        char_format.setForeground(QColor("black")) # Set text color to black
         cursor.mergeCharFormat(char_format)
-        logger.debug(f"apply_extraction_highlight: Char format merged with background {color.name()}.")
+        logger.debug(f"apply_extraction_highlight: Char format merged with background {highlight_color.name()}.")
         
         final_cursor_pos = cursor.selectionEnd()
         cursor.clearSelection()
@@ -620,6 +624,100 @@ class TopicEditorWidget(QWidget): # Changed from QTextEdit to QWidget
         # However, to ensure consistency, we can always set and emit:
         # self._is_dirty = False
         # self.dirty_changed.emit(False)
+
+    def set_font(self, font: QFont):
+        """Sets the font for the editor."""
+        self.editor.setFont(font)
+        # If you want to apply this font to existing content, you might need to iterate or select all and apply.
+        # For now, this will affect new text and potentially the default for unformatted existing text.
+        # To apply to all existing content:
+        # cursor = self.editor.textCursor()
+        # cursor.select(QTextCursor.SelectionType.Document)
+        # char_format = QTextCharFormat()
+        # char_format.setFont(font)
+        # cursor.mergeCharFormat(char_format)
+        # cursor.clearSelection()
+        # self.editor.setTextCursor(cursor)
+        # self.editor.setCurrentCharFormat(char_format) # Ensure new typing uses this font
+
+    def set_extraction_highlight_color(self, color_str: str):
+        """Sets the color used for extraction highlights."""
+        # This method would store the color. The actual application of the color
+        # happens in _apply_existing_highlights and apply_extraction_highlight.
+        # We need to decide if changing this should re-apply all highlights.
+        # For now, let's assume apply_extraction_highlight will use a fixed color
+        # or a color fetched from settings/property at the time of highlighting.
+        # If we want dynamic re-coloring, _apply_existing_highlights would need to be
+        # called after this, and apply_extraction_highlight would need to use the new color.
+        
+        # For simplicity, let's assume apply_extraction_highlight uses a hardcoded color for now,
+        # and this setting would be used if we refactor it to be dynamic.
+        # Or, we can update a property here that apply_extraction_highlight reads.
+        try:
+            self._extraction_highlight_color = QColor(color_str)
+            logger.info(f"Extraction highlight color set to: {color_str}")
+            # If content is loaded and has highlights, re-apply them with the new color
+            if self.current_topic_id and self.data_manager:
+                self._apply_existing_highlights(self.data_manager) # This will use the new color if apply_extraction_highlight is adapted
+        except Exception as e:
+            logger.error(f"Invalid color string for extraction highlight: {color_str}. Error: {e}")
+            self._extraction_highlight_color = QColor("#A7D8DE") # Fallback to default
+
+
+    # In apply_extraction_highlight, change:
+    # highlight_color = QColor("#A7D8DE") # Fixed light teal color
+    # TO:
+    # highlight_color = getattr(self, '_extraction_highlight_color', QColor("#A7D8DE"))
+
+    # Make sure to initialize _extraction_highlight_color in __init__
+    # self._extraction_highlight_color = QColor("#A7D8DE") # Default
+
+    def set_font(self, font: QFont):
+        """Sets the font for the editor."""
+        self.editor.setFont(font)
+        # If you want to apply this font to existing content, you might need to iterate or select all and apply.
+        # For now, this will affect new text and potentially the default for unformatted existing text.
+        # To apply to all existing content:
+        # cursor = self.editor.textCursor()
+        # cursor.select(QTextCursor.SelectionType.Document)
+        # char_format = QTextCharFormat()
+        # char_format.setFont(font)
+        # cursor.mergeCharFormat(char_format)
+        # cursor.clearSelection()
+        # self.editor.setTextCursor(cursor)
+        # self.editor.setCurrentCharFormat(char_format) # Ensure new typing uses this font
+
+    def set_extraction_highlight_color(self, color_str: str):
+        """Sets the color used for extraction highlights."""
+        # This method would store the color. The actual application of the color
+        # happens in _apply_existing_highlights and apply_extraction_highlight.
+        # We need to decide if changing this should re-apply all highlights.
+        # For now, let's assume apply_extraction_highlight will use a fixed color
+        # or a color fetched from settings/property at the time of highlighting.
+        # If we want dynamic re-coloring, _apply_existing_highlights would need to be
+        # called after this, and apply_extraction_highlight would need to use the new color.
+        
+        # For simplicity, let's assume apply_extraction_highlight uses a hardcoded color for now,
+        # and this setting would be used if we refactor it to be dynamic.
+        # Or, we can update a property here that apply_extraction_highlight reads.
+        try:
+            self._extraction_highlight_color = QColor(color_str)
+            logger.info(f"Extraction highlight color set to: {color_str}")
+            # If content is loaded and has highlights, re-apply them with the new color
+            if self.current_topic_id and self.data_manager:
+                self._apply_existing_highlights(self.data_manager) # This will use the new color if apply_extraction_highlight is adapted
+        except Exception as e:
+            logger.error(f"Invalid color string for extraction highlight: {color_str}. Error: {e}")
+            self._extraction_highlight_color = QColor("#A7D8DE") # Fallback to default
+
+
+    # In apply_extraction_highlight, change:
+    # highlight_color = QColor("#A7D8DE") # Fixed light teal color
+    # TO:
+    # highlight_color = getattr(self, '_extraction_highlight_color', QColor("#A7D8DE"))
+
+    # Make sure to initialize _extraction_highlight_color in __init__
+    # self._extraction_highlight_color = QColor("#A7D8DE") # Default
 
 
 if __name__ == '__main__':

@@ -1,9 +1,9 @@
 import logging
 import os # For __main__ test
 
-from PyQt6.QtCore import Qt, pyqtSignal, QItemSelectionModel
+from PyQt6.QtCore import Qt, pyqtSignal, QItemSelectionModel, QItemSelection
 from PyQt6.QtGui import QFont, QStandardItem, QStandardItemModel, QKeyEvent, QAction
-from PyQt6.QtWidgets import QAbstractItemView, QTreeView, QMessageBox, QMenu, QInputDialog
+from PyQt6.QtWidgets import QAbstractItemView, QTreeView, QMessageBox, QMenu
  
 from .data_manager import DataManager # Import the DataManager class
 from .commands.topic_commands import DeleteMultipleTopicsCommand, CreateTopicCommand # Import the command
@@ -462,6 +462,15 @@ class KnowledgeTreeWidget(QTreeView):
         except Exception as e:
             logger.error(f"Error executing CreateTopicCommand for sibling: {e}")
             QMessageBox.critical(self, "Error", f"Failed to add sibling topic: {e}")
+
+    def set_font(self, font: QFont):
+        """Sets the font for the entire tree view."""
+        self.setFont(font)
+        # If items have specific fonts set, this might not override them unless
+        # you iterate through all items and update their font individually.
+        # For a general tree font, setting it on the QTreeView itself is usually sufficient.
+        # self.model.itemChanged.emit(self.model.item(0,0)) # Force redraw if needed
+        self.update() # Request a repaint
 
 
 if __name__ == '__main__':
