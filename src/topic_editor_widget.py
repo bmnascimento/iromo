@@ -3,7 +3,7 @@ import os # For __main__ test
 import shutil # For __main__ test cleanup
 import datetime # For __main__ test
 
-from PyQt6.QtCore import Qt, pyqtSignal, QUrl
+from PyQt6.QtCore import pyqtSignal, QUrl, QThread, QObject # Removed QTimer
 from PyQt6.QtGui import (
     QAction,
     QColor,
@@ -13,6 +13,7 @@ from PyQt6.QtGui import (
     QTextBlockFormat,
     QTextCharFormat,
     QTextCursor,
+    QFocusEvent, # Added QFocusEvent
 )
 from PyQt6.QtWidgets import QApplication, QTextEdit, QToolBar, QVBoxLayout, QWidget
 
@@ -20,9 +21,37 @@ from .data_manager import DataManager # Import the DataManager class
 
 logger = logging.getLogger(__name__)
 
+# Worker for background saving
+class SaveWorker(QObject):
+    finished = pyqtSignal()
+    error = pyqtSignal(str)
+    success = pyqtSignal(str) # Emits the saved content
+
+    def __init__(self, data_manager, topic_id, content_to_save):
+        super().__init__()
+        self.data_manager = data_manager
+        self.topic_id = topic_id
+        self.content_to_save = content_to_save
+
+    def run(self):
+        try:
+            if self.data_manager and self.topic_id:
+                logger.info(f"SaveWorker: Saving content for topic {self.topic_id} in background thread.")
+                self.data_manager.save_topic_content(self.topic_id, self.content_to_save)
+                self.success.emit(self.content_to_save)
+            else:
+                raise ValueError("DataManager or Topic ID not provided to SaveWorker.")
+        except Exception as e:
+            logger.error(f"SaveWorker: Error saving topic {self.topic_id}: {e}", exc_info=True)
+            self.error.emit(str(e))
+        finally:
+            self.finished.emit()
+
+
 class TopicEditorWidget(QWidget): # Changed from QTextEdit to QWidget
     content_changed_externally = pyqtSignal() # Emitted if content is changed by an external action (e.g. undo/redo of save)
     dirty_changed = pyqtSignal(bool) # Emitted when the dirty state changes
+    # AUTO_SAVE_INTERVAL = 2000 # milliseconds (2 seconds) # REMOVED
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -30,9 +59,18 @@ class TopicEditorWidget(QWidget): # Changed from QTextEdit to QWidget
         self.data_manager = None # Store DataManager instance
         self.original_content = "" # Stores the content as it was when loaded or last saved
         self._is_dirty = False      # True if content has changed since last load/save
+        self.save_thread = None
+        self.save_worker = None
 
         self._setup_ui()
+        # self._setup_auto_save_timer() # REMOVED
         self._connect_signals()
+
+    # def _setup_auto_save_timer(self): # REMOVED
+    #     self.auto_save_timer = QTimer(self) # REMOVED
+    #     self.auto_save_timer.setSingleShot(True) # REMOVED
+    #     self.auto_save_timer.setInterval(self.AUTO_SAVE_INTERVAL) # REMOVED
+    #     self.auto_save_timer.timeout.connect(self._initiate_auto_save) # REMOVED
 
     def _setup_ui(self):
         """Sets up the UI elements for the widget."""
@@ -108,9 +146,87 @@ class TopicEditorWidget(QWidget): # Changed from QTextEdit to QWidget
 
     def _connect_signals(self):
         """Connects signals for the editor."""
-        self.editor.textChanged.connect(self._handle_text_changed)
+        self.editor.textChanged.connect(self._on_text_changed) # Renamed from _on_text_changed_for_auto_save
         self.editor.currentCharFormatChanged.connect(self._update_format_actions)
         self.editor.cursorPositionChanged.connect(self._update_format_actions)
+
+    def _on_text_changed(self): # Renamed from _on_text_changed_for_auto_save
+        """Handles text changes to update dirty status."""
+        # First, update the dirty status based on content difference
+        if not hasattr(self, 'editor') or self.editor is None:
+            return
+
+        current_text = self.editor.toHtml()
+        if not self._is_dirty and current_text != self.original_content:
+            self._is_dirty = True
+            self.dirty_changed.emit(True)
+            logger.debug(f"TopicEditorWidget for {self.current_topic_id} became dirty.")
+        elif self._is_dirty and current_text == self.original_content:
+            # This case might happen if user undoes changes to match original
+            self._is_dirty = False
+            self.dirty_changed.emit(False)
+            logger.debug(f"TopicEditorWidget for {self.current_topic_id} became clean by reverting to original.")
+
+        # Auto-save timer logic removed
+        # if self.current_topic_id and self.data_manager and self._is_dirty:
+        #     logger.debug(f"Text changed for {self.current_topic_id}, restarting auto-save timer.")
+        #     self.auto_save_timer.start() # REMOVED
+        # elif not self._is_dirty and self.auto_save_timer.isActive():
+        #     logger.debug(f"Content for {self.current_topic_id} is no longer dirty, stopping auto-save timer.")
+        #     self.auto_save_timer.stop() # REMOVED
+
+    # def _initiate_auto_save(self): # REMOVED
+    #     if not self._is_dirty or not self.current_topic_id or not self.data_manager: # REMOVED
+    #         logger.debug("Auto-save triggered, but conditions not met (not dirty, no topic_id, or no data_manager). Skipping.") # REMOVED
+    #         return # REMOVED
+    # # REMOVED
+    #     if self.save_thread and self.save_thread.isRunning(): # REMOVED
+    #         logger.warning(f"Auto-save for {self.current_topic_id}: Previous save operation still in progress. Skipping new save.") # REMOVED
+    #         # Optionally, restart timer to try again later, or queue the save. # REMOVED
+    #         # For simplicity, we skip and rely on next textChanged or explicit save. # REMOVED
+    #         # self.auto_save_timer.start() # Re-queue # REMOVED
+    #         return # REMOVED
+    # # REMOVED
+    #     content_to_save = self.editor.toHtml() # REMOVED
+    #     logger.info(f"Auto-saving content for topic {self.current_topic_id}. Dirty: {self._is_dirty}") # REMOVED
+    # # REMOVED
+    #     self.save_thread = QThread(self) # REMOVED
+    #     self.save_worker = SaveWorker(self.data_manager, self.current_topic_id, content_to_save) # REMOVED
+    #     self.save_worker.moveToThread(self.save_thread) # REMOVED
+    # # REMOVED
+    #     self.save_worker.success.connect(self._handle_save_success) # REMOVED
+    #     self.save_worker.error.connect(self._handle_save_failure) # REMOVED
+    #     self.save_worker.finished.connect(self.save_thread.quit) # REMOVED
+    #     self.save_worker.finished.connect(self.save_worker.deleteLater) # REMOVED
+    #     self.save_thread.finished.connect(self.save_thread.deleteLater) # REMOVED
+    #     self.save_thread.started.connect(self.save_worker.run) # REMOVED
+    # # REMOVED
+    #     self.save_thread.start() # REMOVED
+
+    def _handle_save_success(self, saved_content: str):
+        logger.info(f"Successfully saved topic {self.current_topic_id}.") # Changed "auto-saved" to "saved"
+        self.original_content = saved_content # Update baseline to the successfully saved content
+        if self.editor.toHtml() == saved_content: # Check if content changed again during save
+            self.mark_as_clean() # Resets _is_dirty to False and emits signal
+        else:
+            # Content changed again while saving, so it's still dirty relative to the *new* original_content
+            # The _on_text_changed will handle restarting the timer if needed.
+            logger.debug(f"Content for {self.current_topic_id} was modified during background save. Remains dirty.")
+            # No need to explicitly set _is_dirty = True, as _on_text_changed will do it.
+
+        # Clean up references
+        self.save_thread = None
+        self.save_worker = None
+
+
+    def _handle_save_failure(self, error_message: str):
+        logger.error(f"Save failed for topic {self.current_topic_id}: {error_message}") # Changed "Auto-save" to "Save"
+        # Decide on error handling: maybe a status bar message, or keep dirty flag
+        # For now, we keep it dirty, so the next change or manual action might retry.
+        # Clean up references
+        self.save_thread = None
+        self.save_worker = None
+
 
     # --- Formatting Action Handlers ---
     def _toggle_bold(self):
@@ -221,19 +337,22 @@ class TopicEditorWidget(QWidget): # Changed from QTextEdit to QWidget
         if content is not None:
             self.current_topic_id = topic_id
             self.original_content = content # Store original content
+            logger.debug(f"TopicEditorWidget: Content for topic {topic_id} before setHtml: '{content[:500]}'") # Log first 500 chars
             self.editor.setHtml(content) # Render content as HTML
             self.mark_as_clean() # Sets _is_dirty to False and emits signal
+            # if self.auto_save_timer.isActive(): # Stop any pending save from previous topic # REMOVED
+            #     self.auto_save_timer.stop() # REMOVED
             self.action_open_file.setEnabled(True) # Enable button
             logger.debug(f"After setHtml for {topic_id}. Doc text: '{self._get_document_text_for_logging()}'")
 
-            cursor = self.editor.textCursor()
-            cursor.select(QTextCursor.SelectionType.Document)
-            default_format = QTextCharFormat()
-            # default_format.setFont(self.editor.font()) # Ensure it uses the editor's default font
-            cursor.setCharFormat(default_format)
-            cursor.clearSelection()
-            self.editor.setTextCursor(cursor)
-            logger.debug(f"Applied default char format to entire document for topic {topic_id}.")
+            # cursor = self.editor.textCursor()
+            # cursor.select(QTextCursor.SelectionType.Document)
+            # default_format = QTextCharFormat()
+            # # default_format.setFont(self.editor.font()) # Ensure it uses the editor's default font
+            # cursor.setCharFormat(default_format)
+            # cursor.clearSelection()
+            # self.editor.setTextCursor(cursor)
+            # logger.debug(f"Applied default char format to entire document for topic {topic_id}.")
 
             self._apply_existing_highlights(self.data_manager)
         else:
@@ -323,40 +442,114 @@ class TopicEditorWidget(QWidget): # Changed from QTextEdit to QWidget
         self.action_open_file.setEnabled(False) # Disable button
         self.data_manager = None # Clear stored DataManager
 
-    def _handle_text_changed(self):
-        """Sets the dirty flag if the current content differs from original_content."""
-        # Check if the editor is available, e.g. during __init__ it might not be fully set up
-        if not hasattr(self, 'editor') or self.editor is None:
-            return
-
-        if not self._is_dirty: # Only change and emit if it wasn't already dirty
-            current_text = self.editor.toHtml() # Use self.editor
-            if current_text != self.original_content:
-                self._is_dirty = True
-                self.dirty_changed.emit(True)
-                logger.debug(f"TopicEditorWidget for {self.current_topic_id} became dirty.")
+    # _handle_text_changed is now part of _on_text_changed_for_auto_save
+    # def _handle_text_changed(self):
+    #     """Sets the dirty flag if the current content differs from original_content."""
+    #     # Check if the editor is available, e.g. during __init__ it might not be fully set up
+    #     if not hasattr(self, 'editor') or self.editor is None:
+    #         return
+    #
+    #     if not self._is_dirty: # Only change and emit if it wasn't already dirty
+    #         current_text = self.editor.toHtml() # Use self.editor
+    #         if current_text != self.original_content:
+    #             self._is_dirty = True
+    #             self.dirty_changed.emit(True)
+    #             logger.debug(f"TopicEditorWidget for {self.current_topic_id} became dirty.")
 
     def is_dirty(self) -> bool:
         """Returns True if the content has been modified since it was last loaded or saved."""
         return self._is_dirty
 
-    def mark_as_saved(self):
+    def force_save_if_dirty(self, wait_for_completion=False):
         """
-        Marks the current content as saved by updating the original_content baseline
-        and resetting the dirty flag.
+        If the content is dirty, triggers an immediate save.
+        If wait_for_completion is True, this method will block until the save is done.
+        Otherwise, it will attempt to save in the background.
         """
-        if not hasattr(self, 'editor') or self.editor is None: # Guard
-            self.original_content = ""
-        else:
-            self.original_content = self.editor.toHtml() # Use self.editor
-        self.mark_as_clean()
-        logger.debug(f"TopicEditorWidget for {self.current_topic_id} marked as saved (clean).")
+        if not self._is_dirty or not self.current_topic_id or not self.data_manager:
+            logger.debug(f"Force save called for {self.current_topic_id}, but not dirty or no topic/DM. Skipping.")
+            return
 
+        logger.info(f"Force saving content for topic {self.current_topic_id} (wait_for_completion={wait_for_completion}).")
+        content_to_save = self.editor.toHtml()
+
+        if self.save_thread and self.save_thread.isRunning():
+            logger.warning(f"Force save for {self.current_topic_id}: A save operation is already in progress.")
+            if wait_for_completion:
+                logger.info(f"Waiting for existing save thread to complete for topic {self.current_topic_id}.")
+                self.save_thread.wait() # Wait for the existing thread to finish
+                if not self._is_dirty:
+                    logger.info(f"Force save for {self.current_topic_id}: Content became clean while waiting. Skipping new save.")
+                    return
+                logger.info(f"Force save for {self.current_topic_id}: Content still dirty after waiting. Proceeding with current save.")
+            else:
+                logger.info(f"Force save for {self.current_topic_id}: Save in progress, and not waiting. Skipping this save trigger.")
+                return
+
+        if not self._is_dirty:
+            logger.info(f"Force save for {self.current_topic_id}: Content is no longer dirty (checked after potential wait). Skipping.")
+            return
+
+        if wait_for_completion:
+            try:
+                logger.info(f"Force save (blocking) for topic {self.current_topic_id}.")
+                self.data_manager.save_topic_content(self.current_topic_id, content_to_save)
+                self._handle_save_success(content_to_save)
+            except Exception as e:
+                logger.error(f"Force save (blocking) for topic {self.current_topic_id} failed: {e}", exc_info=True)
+                self._handle_save_failure(str(e))
+        else: # Asynchronous save
+            logger.info(f"Force save (non-blocking) for topic {self.current_topic_id}. Initiating background save.")
+            self.save_thread = QThread(self)
+            self.save_worker = SaveWorker(self.data_manager, self.current_topic_id, content_to_save)
+            self.save_worker.moveToThread(self.save_thread)
+
+            self.save_worker.success.connect(self._handle_save_success)
+            self.save_worker.error.connect(self._handle_save_failure)
+            self.save_worker.finished.connect(self.save_thread.quit)
+            self.save_worker.finished.connect(self.save_worker.deleteLater)
+            self.save_thread.finished.connect(self.save_thread.deleteLater)
+            self.save_thread.started.connect(self.save_worker.run)
+            self.save_thread.start()
+
+
+    def mark_as_saved(self, saved_content: str):
+        """
+        Marks the content as saved by updating original_content and resetting the dirty flag.
+        This is typically called after a successful save operation.
+        """
+        self.original_content = saved_content
+        self.mark_as_clean()
+
+    # --- Focus Event Handling ---
+    def focusOutEvent(self, event: QFocusEvent):
+        """Handle the editor losing focus."""
+        logger.debug(f"TopicEditorWidget for topic {self.current_topic_id} lost focus. Reason: {event.reason()}. Checking if dirty to save.")
+        # Check if the new focus widget is a child of this TopicEditorWidget.
+        # This prevents saving when focus moves, for example, from the QTextEdit to the QToolBar within this widget.
+        new_focus_widget = QApplication.focusWidget()
+        if new_focus_widget:
+            is_child = False
+            parent = new_focus_widget
+            while parent:
+                if parent == self:
+                    is_child = True
+                    break
+                parent = parent.parent()
+            
+            if is_child:
+                logger.debug(f"Focus moved to a child widget ({new_focus_widget.__class__.__name__}) of TopicEditorWidget. Not saving.")
+                super().focusOutEvent(event)
+                return
+
+        self.force_save_if_dirty(wait_for_completion=False) # Non-blocking save
+        super().focusOutEvent(event) # Call base class implementation
     def mark_as_clean(self):
         """Resets the dirty flag and emits the dirty_changed signal if state changes."""
         if self._is_dirty:
             self._is_dirty = False
             self.dirty_changed.emit(False)
+            logger.debug(f"TopicEditorWidget for {self.current_topic_id} marked as clean.")
         # If it was already clean, no need to emit the signal again.
         # However, to ensure consistency, we can always set and emit:
         # self._is_dirty = False

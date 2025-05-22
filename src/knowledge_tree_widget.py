@@ -2,11 +2,11 @@ import logging
 import os # For __main__ test
 
 from PyQt6.QtCore import Qt, pyqtSignal, QItemSelectionModel
-from PyQt6.QtGui import QFont, QStandardItem, QStandardItemModel, QKeyEvent
-from PyQt6.QtWidgets import QAbstractItemView, QTreeView
-
+from PyQt6.QtGui import QFont, QStandardItem, QStandardItemModel, QKeyEvent, QAction
+from PyQt6.QtWidgets import QAbstractItemView, QTreeView, QMessageBox, QMenu, QInputDialog
+ 
 from .data_manager import DataManager # Import the DataManager class
-from .commands.topic_commands import DeleteMultipleTopicsCommand # Import the command
+from .commands.topic_commands import DeleteMultipleTopicsCommand, CreateTopicCommand # Import the command
 
 logger = logging.getLogger(__name__)
 
@@ -278,27 +278,37 @@ class KnowledgeTreeWidget(QTreeView):
                 
                 if topic_ids_to_delete:
                     logger.info(f"Delete key pressed. Topics to delete: {topic_ids_to_delete}")
-                    
-                    if not self.data_manager:
-                        logger.error("Cannot delete topics: DataManager not available.")
-                        return
 
-                    # Access UndoManager, assuming it's on the main window
-                    undo_manager = None
-                    if hasattr(self.window(), 'undo_manager'):
-                        undo_manager = self.window().undo_manager
-                    
-                    if not undo_manager:
-                        logger.error("Cannot delete topics: UndoManager not available.")
-                        return
+                    # Confirmation Dialog
+                    reply = QMessageBox.question(self, 'Confirm Deletion',
+                                                 f"Are you sure you want to delete {len(topic_ids_to_delete)} topic(s)?",
+                                                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                                 QMessageBox.StandardButton.No)
 
-                    command = DeleteMultipleTopicsCommand(self.data_manager, topic_ids_to_delete)
-                    undo_manager.execute_command(command)
-                    # If push_command doesn't execute, then:
-                    # undo_manager.execute_command(command) or command.execute(); undo_manager.add_command(command)
-                    # Based on typical UndoManager patterns, push_command often implies execute + add to stack.
-                    # Let's assume `push_command` handles execution. If not, this needs adjustment.
-                    logger.info(f"Executed DeleteMultipleTopicsCommand for IDs: {topic_ids_to_delete}")
+                    if reply == QMessageBox.StandardButton.Yes:
+                        logger.info(f"User confirmed deletion for topics: {topic_ids_to_delete}")
+                        if not self.data_manager:
+                            logger.error("Cannot delete topics: DataManager not available.")
+                            return
+
+                        # Access UndoManager, assuming it's on the main window
+                        undo_manager = None
+                        if hasattr(self.window(), 'undo_manager'):
+                            undo_manager = self.window().undo_manager
+                        
+                        if not undo_manager:
+                            logger.error("Cannot delete topics: UndoManager not available.")
+                            return
+
+                        command = DeleteMultipleTopicsCommand(self.data_manager, topic_ids_to_delete)
+                        undo_manager.execute_command(command)
+                        # If push_command doesn't execute, then:
+                        # undo_manager.execute_command(command) or command.execute(); undo_manager.add_command(command)
+                        # Based on typical UndoManager patterns, push_command often implies execute + add to stack.
+                        # Let's assume `push_command` handles execution. If not, this needs adjustment.
+                        logger.info(f"Executed DeleteMultipleTopicsCommand for IDs: {topic_ids_to_delete}")
+                    else:
+                        logger.info(f"User cancelled deletion for topics: {topic_ids_to_delete}")
                 else:
                     logger.debug("Delete key pressed, but no valid topic items selected.")
             else:
@@ -306,6 +316,172 @@ class KnowledgeTreeWidget(QTreeView):
             event.accept() # Indicate event was handled
         else:
             super().keyPressEvent(event) # Pass to parent for other keys
+
+    def contextMenuEvent(self, event):
+        """Handles context menu requests for the tree view."""
+        logger.debug("contextMenuEvent triggered.")
+        selected_index = self.indexAt(event.pos())
+        menu = QMenu(self)
+
+        # Placeholder actions
+        add_child_action = QAction("Add Child", self)
+        add_child_action.triggered.connect(self._handle_add_child)
+        menu.addAction(add_child_action)
+
+        add_sibling_action = QAction("Add Sibling", self)
+        add_sibling_action.triggered.connect(self._handle_add_sibling)
+        menu.addAction(add_sibling_action)
+
+        # Only show menu if there's an item, or always show for broader actions?
+        # For now, let's assume we always want to show it if the tree itself is right-clicked.
+        # If we only want it on items:
+        # if selected_index.isValid():
+        #     item = self.model.itemFromIndex(selected_index)
+        #     if item and item.data(Qt.ItemDataRole.UserRole) is not None: # Is a real topic
+        #         menu.exec(event.globalPos())
+        # else:
+        #     # Context menu on empty area - perhaps only "Add Root Topic"?
+        #     # For now, let's keep it simple and show for any right click.
+        #     pass
+        
+        # Show the menu if there are actions.
+        # We might want to disable actions if no item is selected, or if a placeholder is selected.
+        is_item_selected = selected_index.isValid()
+        is_placeholder_selected = False
+        if is_item_selected:
+            item = self.model.itemFromIndex(selected_index)
+            if item and item.data(Qt.ItemDataRole.UserRole) is None: # It's a placeholder
+                is_placeholder_selected = True
+        
+        # Disable actions if no item is selected or if a placeholder is selected
+        if not is_item_selected or is_placeholder_selected:
+            add_child_action.setEnabled(False)
+            add_sibling_action.setEnabled(False)
+            # Potentially add a "Add Root Topic" action here if desired for empty space clicks
+
+        if menu.actions(): # Only show if there are actions to show
+            menu.exec(event.globalPos())
+        else:
+            logger.debug("No actions in context menu, not showing.")
+
+    def _handle_add_child(self):
+        """Handles adding a child topic to the selected topic."""
+        parent_topic_id = self.get_selected_topic_id()
+        if not parent_topic_id:
+            logger.warning("Add Child: No parent topic selected.")
+            QMessageBox.warning(self, "Add Child", "Please select a parent topic first.")
+            return
+
+        # Prompt for the new topic name
+        child_topic_name, ok = QInputDialog.getText(self, "Add Child Topic", "Enter name for the new child topic:")
+
+        if ok and child_topic_name:
+            logger.info(f"Attempting to add child topic '{child_topic_name}' to parent '{parent_topic_id}'.")
+            
+            if not self.data_manager:
+                logger.error("Cannot add child topic: DataManager not available.")
+                QMessageBox.critical(self, "Error", "DataManager is not available. Cannot add topic.")
+                return
+
+            undo_manager = None
+            if hasattr(self.window(), 'undo_manager'):
+                undo_manager = self.window().undo_manager
+            
+            if not undo_manager:
+                logger.error("Cannot add child topic: UndoManager not available.")
+                QMessageBox.critical(self, "Error", "UndoManager is not available. Cannot add topic.")
+                return
+
+            command = CreateTopicCommand(
+                data_manager=self.data_manager,
+                parent_id=parent_topic_id,
+                custom_title=child_topic_name,
+                text_content="" # Child topics start with empty content by default
+            )
+            
+            try:
+                undo_manager.execute_command(command) # Assumes execute_command also adds to stack
+                logger.info(f"Executed CreateTopicCommand for new child '{child_topic_name}' under parent '{parent_topic_id}'.")
+                # The KnowledgeTreeWidget should update automatically if it's listening to
+                # DataManager.topic_created signal (typically via MainWindow).
+                # If direct refresh is needed and not handled by signals:
+                # self.load_tree_data(self.data_manager) # Or a more targeted update
+            except Exception as e:
+                logger.error(f"Error executing CreateTopicCommand: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to add child topic: {e}")
+        elif ok and not child_topic_name:
+            logger.info("Add Child: User provided an empty name.")
+            QMessageBox.information(self, "Add Child", "Topic name cannot be empty.")
+        else:
+            logger.info("Add Child: User cancelled the dialog.")
+
+    def _handle_add_sibling(self):
+        """Handles adding a sibling topic to the selected topic."""
+        current_index = self.currentIndex()
+        if not current_index.isValid():
+            logger.warning("Add Sibling: No item selected.")
+            QMessageBox.warning(self, "Add Sibling", "Please select an item in the tree first.")
+            return
+
+        selected_item = self.model.itemFromIndex(current_index)
+        if not selected_item or selected_item.data(Qt.ItemDataRole.UserRole) is None:
+            logger.warning("Add Sibling: Selected item is not a valid topic (e.g., placeholder).")
+            QMessageBox.warning(self, "Add Sibling", "Please select a valid topic to add a sibling to.")
+            return
+
+        # Determine the parent for the new sibling
+        parent_item = selected_item.parent()
+        sibling_parent_id = None
+        if parent_item: # Selected item has a parent, so sibling shares this parent
+            sibling_parent_id = parent_item.data(Qt.ItemDataRole.UserRole)
+            if sibling_parent_id is None: # Parent item is somehow not a valid topic (should not happen with valid tree)
+                logger.error(f"Add Sibling: Parent item of selected topic '{selected_item.text()}' has no topic ID.")
+                QMessageBox.critical(self, "Error", "Could not determine parent for the new sibling topic.")
+                return
+        else: # Selected item is a root topic, so sibling will also be a root topic
+            sibling_parent_id = None
+            logger.info(f"Add Sibling: Selected item '{selected_item.text()}' is a root topic. New sibling will also be a root topic.")
+
+
+        # Prompt for the new topic name
+        sibling_topic_name, ok = QInputDialog.getText(self, "Add Sibling Topic", "Enter name for the new sibling topic:")
+
+        if ok and sibling_topic_name:
+            logger.info(f"Attempting to add sibling topic '{sibling_topic_name}' with parent_id '{sibling_parent_id}'.")
+
+            if not self.data_manager:
+                logger.error("Cannot add sibling topic: DataManager not available.")
+                QMessageBox.critical(self, "Error", "DataManager is not available. Cannot add topic.")
+                return
+
+            undo_manager = None
+            if hasattr(self.window(), 'undo_manager'):
+                undo_manager = self.window().undo_manager
+            
+            if not undo_manager:
+                logger.error("Cannot add sibling topic: UndoManager not available.")
+                QMessageBox.critical(self, "Error", "UndoManager is not available. Cannot add topic.")
+                return
+
+            command = CreateTopicCommand(
+                data_manager=self.data_manager,
+                parent_id=sibling_parent_id, # This will be None for root topics
+                custom_title=sibling_topic_name,
+                text_content="" # New topics start with empty content
+            )
+            
+            try:
+                undo_manager.execute_command(command)
+                logger.info(f"Executed CreateTopicCommand for new sibling '{sibling_topic_name}' (parent ID: {sibling_parent_id}).")
+                # Tree updates are expected via signals from DataManager
+            except Exception as e:
+                logger.error(f"Error executing CreateTopicCommand for sibling: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to add sibling topic: {e}")
+        elif ok and not sibling_topic_name:
+            logger.info("Add Sibling: User provided an empty name.")
+            QMessageBox.information(self, "Add Sibling", "Topic name cannot be empty.")
+        else:
+            logger.info("Add Sibling: User cancelled the dialog.")
 
 
 if __name__ == '__main__':

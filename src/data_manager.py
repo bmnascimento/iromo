@@ -175,7 +175,10 @@ class DataManager(QObject):
         final_created_at = created_at if created_at else now
         final_updated_at = updated_at if updated_at else now
         
-        title = custom_title if custom_title else self._generate_initial_title(text_content)
+        if custom_title:
+            title = custom_title
+        else:
+            title = dt.datetime.now().strftime("Topic %Y-%m-%d %H:%M:%S")
         # Ensure display_order is an int or None. Default to 0 if None and not specified.
         # However, display_order might be better handled by a separate update or move logic
         # if it involves reordering siblings. For simple creation, it can be set.
@@ -417,37 +420,41 @@ class DataManager(QObject):
         finally:
             conn.close()
 
-    def _delete_topic_recursive(self, topic_id, conn):
+    def _delete_topic_recursive(self, topic_id, conn) -> list | None:
         """
         Internal helper to recursively delete a topic and its descendants.
         Assumes conn is an active database connection with a cursor.
-        Returns True if successful, False otherwise.
-        This method performs the actual deletion and emits signals.
+        Returns a list of (deleted_topic_id, original_parent_id) tuples on success,
+        or None on failure (triggering a rollback).
+        This method performs the actual deletion but DOES NOT emit signals.
         """
+        deleted_topics_info = []
         cursor = conn.cursor()
         logger.debug(f"_delete_topic_recursive: Attempting to delete topic {topic_id}")
 
-        # Get details of the current topic (needed for file deletion and signal)
+        # Get details of the current topic
         cursor.execute("SELECT text_file_uuid, parent_id FROM topics WHERE id = ?", (topic_id,))
         topic_data = cursor.fetchone()
         if not topic_data:
             logger.warning(f"_delete_topic_recursive: Topic {topic_id} not found. Already deleted?")
-            return True # Consider it success if already gone
+            return [] # Success, no topics deleted by this specific call path
 
         text_file_uuid = topic_data['text_file_uuid']
-        original_parent_id = topic_data['parent_id'] # For the signal
+        original_parent_id = topic_data['parent_id']
 
         # Find and delete children first
         cursor.execute("SELECT id FROM topics WHERE parent_id = ?", (topic_id,))
         children_ids = [row['id'] for row in cursor.fetchall()]
         for child_id in children_ids:
-            if not self._delete_topic_recursive(child_id, conn):
+            child_deleted_list = self._delete_topic_recursive(child_id, conn)
+            if child_deleted_list is None: # If child deletion failed
                 logger.error(f"_delete_topic_recursive: Failed to delete child {child_id} of {topic_id}. Aborting delete for {topic_id}.")
-                return False # Propagate failure
+                return None # Propagate failure
+            deleted_topics_info.extend(child_deleted_list)
 
-        # All children (if any) are deleted, now delete this topic
+        # All children (if any) are processed, now delete this topic
         try:
-            # Delete associated extractions (where this topic is parent or child)
+            # Delete associated extractions
             cursor.execute("DELETE FROM extractions WHERE parent_topic_id = ? OR child_topic_id = ?", (topic_id, topic_id))
             logger.debug(f"Deleted extractions associated with topic {topic_id}.")
 
@@ -455,11 +462,11 @@ class DataManager(QObject):
             cursor.execute("DELETE FROM topics WHERE id = ?", (topic_id,))
             if cursor.rowcount == 0:
                 logger.warning(f"_delete_topic_recursive: Topic {topic_id} disappeared before final delete. Assuming already handled.")
-                # Not necessarily an error if a concurrent delete happened, but log it.
-                # No rollback here as children might be successfully deleted.
-                return True
+                # Not an error for this topic's deletion itself, but it wasn't found.
+                # Children might have been deleted. Return current list.
+                return deleted_topics_info
 
-            # Text file deletion happens after DB operations for this topic are confirmed
+            # Text file deletion
             text_file_path = self._get_topic_text_file_path(text_file_uuid)
             if os.path.exists(text_file_path):
                 try:
@@ -467,32 +474,40 @@ class DataManager(QObject):
                     logger.debug(f"Deleted text file: {text_file_path}")
                 except OSError as e:
                     logger.error(f"Error deleting text file {text_file_path} for topic {topic_id}: {e}")
-                    # Log error, but proceed as DB part is done for this topic.
+                    # Log error, but consider DB part successful for this topic.
 
-            logger.info(f"Topic {topic_id} (original parent: {original_parent_id}) deleted successfully.")
-            self.topic_deleted.emit(topic_id, original_parent_id) # Emit signal for this topic
-            return True
+            logger.info(f"Topic {topic_id} (original parent: {original_parent_id}) processed for deletion.")
+            deleted_topics_info.append((topic_id, original_parent_id))
+            return deleted_topics_info
         except sqlite3.Error as e:
             logger.error(f"_delete_topic_recursive: DB error deleting topic {topic_id}: {e}")
-            return False
+            return None # Signal failure
 
 
     def delete_topic(self, topic_id):
         """
         Deletes a topic and all its descendants (cascading delete).
+        Emits topic_deleted signals AFTER successful commit.
         Returns True on success, False on failure.
         The command calling this should fetch all necessary data for undo *before* calling this.
         """
         conn = self._get_db_connection()
+        all_deleted_topic_infos = []
         try:
             conn.execute("BEGIN") # Start transaction
-            if self._delete_topic_recursive(topic_id, conn):
+            
+            deleted_infos_list = self._delete_topic_recursive(topic_id, conn)
+            
+            if deleted_infos_list is not None:
+                all_deleted_topic_infos = deleted_infos_list
                 conn.commit()
-                logger.info(f"Successfully committed deletion of topic {topic_id} and its descendants.")
+                logger.info(f"Successfully committed deletion of topic {topic_id} and its descendants. Total items processed for deletion: {len(all_deleted_topic_infos)}.")
+                for del_id, old_parent_id in all_deleted_topic_infos:
+                    self.topic_deleted.emit(del_id, old_parent_id)
                 return True
             else:
                 conn.rollback()
-                logger.error(f"Failed to delete topic {topic_id} or one of its descendants. Rolled back.")
+                logger.error(f"Failed to process deletion for topic {topic_id} or one of its descendants. Rolled back.")
                 return False
         except sqlite3.Error as e:
             conn.rollback()

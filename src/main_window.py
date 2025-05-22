@@ -76,9 +76,9 @@ class MainWindow(QMainWindow):
         self.new_topic_action.triggered.connect(self._handle_new_topic_action)
         file_menu.addAction(self.new_topic_action)
 
-        self.save_content_action = QAction("&Save Content", self)
-        self.save_content_action.triggered.connect(self.save_current_topic_content)
-        file_menu.addAction(self.save_content_action)
+        # self.save_content_action = QAction("&Save Content", self) # Removed
+        # self.save_content_action.triggered.connect(self.save_current_topic_content) # Removed
+        # file_menu.addAction(self.save_content_action) # Removed
         
         file_menu.addSeparator()
         exit_action = QAction("&Exit", self)
@@ -115,9 +115,9 @@ class MainWindow(QMainWindow):
         self.addAction(self.extract_action_toolbar) # Add shortcut to window context
         toolbar.addAction(self.extract_action_toolbar)
 
-        self.save_content_action_toolbar = QAction("Save Content", self)
-        self.save_content_action_toolbar.triggered.connect(self.save_current_topic_content)
-        toolbar.addAction(self.save_content_action_toolbar)
+        # self.save_content_action_toolbar = QAction("Save Content", self) # Removed
+        # self.save_content_action_toolbar.triggered.connect(self.save_current_topic_content) # Removed
+        # toolbar.addAction(self.save_content_action_toolbar) # Removed
 
     def _setup_central_widget(self):
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -132,6 +132,7 @@ class MainWindow(QMainWindow):
     def _connect_signals(self):
         self.tree_widget.topic_selected.connect(self.handle_topic_selected)
         self.tree_widget.topic_title_changed.connect(self.handle_topic_title_changed)
+        self.editor_widget.dirty_changed.connect(self._update_window_title) # Connect dirty status to title update
 
         # Connect UndoManager signals
         self.undo_manager.can_undo_changed.connect(self.undo_action.setEnabled)
@@ -139,30 +140,48 @@ class MainWindow(QMainWindow):
         self.undo_manager.undo_text_changed.connect(self.undo_action.setText)
         self.undo_manager.redo_text_changed.connect(self.redo_action.setText)
 
+    def _update_window_title(self):
+        title_parts = [APP_NAME]
+        is_dirty = self.editor_widget.is_dirty() if self.editor_widget else False
+        current_editor_topic_id = self.editor_widget.current_topic_id if self.editor_widget else None
+
+        if self.active_collection_path and self.data_manager:
+            collection_name = os.path.basename(self.active_collection_path)
+            title_parts.append(collection_name)
+            
+            if current_editor_topic_id:
+                details = self.data_manager.get_topic_details(current_editor_topic_id)
+                if details and details.get('title'):
+                    title_parts.append(details['title'])
+                elif details: # Topic exists but maybe title is empty or None
+                    title_parts.append("Editing Topic")
+                # If details is None, means topic_id is invalid or not found, title remains collection level
+        else:
+            title_parts.append("No Collection Open")
+        
+        final_title = " - ".join(title_parts)
+        if is_dirty and current_editor_topic_id: # Only show dirty if a topic is actually loaded and dirty
+            final_title += " *"
+        
+        self.setWindowTitle(final_title)
+
     def _update_ui_for_collection_state(self):
         collection_open = self.data_manager is not None
         
         self.close_collection_action.setEnabled(collection_open)
         self.new_topic_action.setEnabled(collection_open)
-        self.save_content_action.setEnabled(collection_open)
-        self.save_content_action_toolbar.setEnabled(collection_open)
+        # self.save_content_action.setEnabled(collection_open) # Removed
+        # self.save_content_action_toolbar.setEnabled(collection_open) # Removed
         self.extract_action_toolbar.setEnabled(collection_open)
         
-        # Undo/Redo actions are managed by UndoManager's signals primarily,
-        # but should also be disabled if no collection is open.
-        # The clear_stacks() call in _open_collection/_handle_close_collection
-        # will trigger _update_signals in UndoManager, which correctly sets their state.
         if not collection_open:
             self.undo_action.setEnabled(False)
             self.redo_action.setEnabled(False)
+            self.tree_widget.clear_tree()
+            if self.editor_widget: # Ensure editor widget exists before clearing
+                self.editor_widget.clear_content()
 
-        if collection_open and self.active_collection_path:
-            collection_name = os.path.basename(self.active_collection_path)
-            self.setWindowTitle(f"{APP_NAME} - {collection_name}")
-        else:
-            self.setWindowTitle(f"{APP_NAME} - No Collection Open")
-            self.tree_widget.clear_tree() # Assumes method exists
-            self.editor_widget.clear_content() # Assumes method exists
+        self._update_window_title() # Centralized title update
             
     def _save_last_collection_path(self, path):
         settings = QSettings(APP_ORGANIZATION_NAME, APP_NAME)
@@ -318,8 +337,11 @@ class MainWindow(QMainWindow):
         if not self.data_manager:
             return
 
-        # Potentially prompt to save unsaved changes if any
         logger.info(f"Closing collection: {self.active_collection_path}")
+        # Ensure current topic is saved if dirty
+        if self.editor_widget and self.editor_widget.current_topic_id and self.editor_widget.is_dirty():
+            logger.info(f"Collection close: Forcing save for dirty topic {self.editor_widget.current_topic_id}.")
+            self.editor_widget.force_save_if_dirty(wait_for_completion=True) # Wait for save to finish
 
         # Disconnect DataManager signals
         if self.data_manager:
@@ -393,28 +415,18 @@ class MainWindow(QMainWindow):
             return
 
         logger.info(f"Topic selected - ID: {topic_id}")
-        # Prompt to save if current editor is dirty
+
+        # Before switching, ensure current topic is saved if dirty.
         if self.editor_widget.current_topic_id and \
            self.editor_widget.current_topic_id != topic_id and \
            self.editor_widget.is_dirty():
-            reply = QMessageBox.question(self, "Unsaved Changes",
-                                         f"Topic '{self.editor_widget.current_topic_id}' has unsaved changes. Save before switching?",
-                                         QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel)
-            if reply == QMessageBox.StandardButton.Save:
-                self.save_current_topic_content(prompt_if_no_topic=False)
-                if self.editor_widget.is_dirty(): # If save failed or was cancelled by user somehow
-                    return # Don't switch topic
-            elif reply == QMessageBox.StandardButton.Cancel:
-                return # Don't switch topic
-            # If Discard, proceed to load new topic
+            logger.info(f"Switching topic: Forcing save for dirty topic {self.editor_widget.current_topic_id}.")
+            self.editor_widget.force_save_if_dirty(wait_for_completion=True) # Wait for save to finish
 
-        # Original logic for saving (now part of the dirty check above)
-        # if self.editor_widget.current_topic_id and self.editor_widget.current_topic_id != topic_id:
-        #     logger.info(f"Saving content for {self.editor_widget.current_topic_id} before switching to {topic_id}.")
-        #     self.save_current_topic_content(prompt_if_no_topic=False)
-        
         # Pass data_manager to load_topic_content
-        self.editor_widget.load_topic_content(topic_id, self.data_manager) # Assumes method signature updated
+        self.editor_widget.load_topic_content(topic_id, self.data_manager)
+        # The editor_widget.dirty_changed signal (emitted as False when new topic loads clean)
+        # will call _update_window_title.
 
     def handle_topic_title_changed(self, topic_id, old_title, new_title): # Assuming old_title is now provided
         if not self.data_manager:
@@ -449,38 +461,35 @@ class MainWindow(QMainWindow):
             if hasattr(self.tree_widget, 'update_topic_item_title'):
                  self.tree_widget.update_topic_item_title(topic_id, old_title)
             
-    def save_current_topic_content(self, prompt_if_no_topic=True): # prompt_if_no_topic might be less relevant now
-        if not self.data_manager or not self.editor_widget.current_topic_id:
-            if prompt_if_no_topic: # Keep for direct calls if any, though mostly driven by dirty state
-                QMessageBox.information(self, "Save Content", "No topic loaded or collection open.")
-            return
+    # def save_current_topic_content(self, prompt_if_no_topic=True): # Manual save removed
+    #     if not self.data_manager or not self.editor_widget.current_topic_id:
+    #         if prompt_if_no_topic:
+    #             QMessageBox.information(self, "Save Content", "No topic loaded or collection open.")
+    #         return
 
-        if not self.editor_widget.is_dirty() and prompt_if_no_topic: # prompt_if_no_topic to allow force save for non-dirty
-            logger.info(f"Content for topic {self.editor_widget.current_topic_id} is not modified. Save not required.")
-            # QMessageBox.information(self, "Save Content", "No changes to save.") # Optional user feedback
-            return
+    #     if not self.editor_widget.is_dirty() and prompt_if_no_topic:
+    #         logger.info(f"Content for topic {self.editor_widget.current_topic_id} is not modified. Save not required.")
+    #         return
 
-        topic_id = self.editor_widget.current_topic_id
-        new_content = self.editor_widget.get_current_content()
-        old_content = self.editor_widget.original_content
+    #     topic_id = self.editor_widget.current_topic_id
+    #     new_content = self.editor_widget.get_current_content()
+    #     old_content = self.editor_widget.original_content
         
-        # Get topic title for command description
-        topic_details = self.data_manager.get_topic_details(topic_id)
-        topic_title = topic_details['title'] if topic_details else topic_id
+    #     topic_details = self.data_manager.get_topic_details(topic_id)
+    #     topic_title = topic_details['title'] if topic_details else topic_id
 
-        cmd = SaveTopicContentCommand(
-            data_manager=self.data_manager,
-            topic_id=topic_id,
-            old_content=old_content,
-            new_content=new_content,
-            topic_title=topic_title
-        )
-        try:
-            self.undo_manager.execute_command(cmd)
-            # self.editor_widget.mark_as_saved() # This is now handled by _handle_command_executed
-        except Exception as e:
-            logger.error(f"Error executing Save Content command for topic {topic_id}: {e}", exc_info=True)
-            QMessageBox.critical(self, "Save Error", f"Could not save content for topic {topic_id}: {e}")
+    #     cmd = SaveTopicContentCommand(
+    #         data_manager=self.data_manager,
+    #         topic_id=topic_id,
+    #         old_content=old_content,
+    #         new_content=new_content,
+    #         topic_title=topic_title
+    #     )
+    #     try:
+    #         self.undo_manager.execute_command(cmd)
+    #     except Exception as e:
+    #         logger.error(f"Error executing Save Content command for topic {topic_id}: {e}", exc_info=True)
+    #         QMessageBox.critical(self, "Save Error", f"Could not save content for topic {topic_id}: {e}")
             
     def extract_text(self):
         if not self.data_manager or not self.editor_widget.current_topic_id:
@@ -494,21 +503,19 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Extract Text", "Please select text to extract.")
             return
 
-        # If the current editor content is dirty, prompt to save first.
-        # Extraction modifies the parent (by adding a highlight), so it's good practice.
+        # If the current editor content is dirty or an auto-save is pending, force save it.
+        # Extraction modifies the parent (by adding a highlight), so it's good practice
+        # to ensure the state being highlighted is the saved state.
         if self.editor_widget.is_dirty():
-            reply = QMessageBox.question(self, "Unsaved Changes",
-                                         "The current topic has unsaved changes. Save before extracting?",
-                                         QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel)
-            if reply == QMessageBox.StandardButton.Save:
-                self.save_current_topic_content(prompt_if_no_topic=False)
-                if self.editor_widget.is_dirty(): # Save failed
-                    return
-            elif reply == QMessageBox.StandardButton.Cancel:
-                return
-            # If Discard, proceed with extraction using current (unsaved) content state for offsets.
-
+            logger.info(f"Extract text: Forcing save for parent topic {parent_topic_id} due to dirty state.")
+            self.editor_widget.force_save_if_dirty(wait_for_completion=True)
+            if self.editor_widget.is_dirty(): # If save failed
+                 QMessageBox.warning(self, "Extract Text", "Failed to save the current topic. Extraction aborted.")
+                 return
+        
         logger.info(f"Attempting to extract: '{selected_text}' from parent {parent_topic_id} (chars {start_char}-{end_char})")
+        # Get topic title for command description
+        parent_topic_details = self.data_manager.get_topic_details(parent_topic_id)
 
         cmd = ExtractTextCommand(
             data_manager=self.data_manager,
@@ -546,13 +553,14 @@ class MainWindow(QMainWindow):
             self.tree_widget.update_topic_item_title(topic_id, new_title)
         else:
             logger.warning("Tree widget not available for UI update on topic_title_changed.")
-        # If the currently edited topic's title changed, update editor's state if necessary
-        # (though title is usually not directly displayed in editor_widget itself for modification)
+        
+        if self.editor_widget and self.editor_widget.current_topic_id == topic_id:
+            self._update_window_title() # Update title as current topic's name changed
 
     def _on_dm_topic_content_saved(self, topic_id: str):
         logger.info(f"DM SIGNAL: Topic Content Saved - ID: {topic_id}")
         if self.editor_widget.current_topic_id == topic_id:
-            self.editor_widget.mark_as_saved() # Update dirty status
+            self.editor_widget.mark_as_clean() # Update dirty status
             # Optionally, reload content if there's a chance it was modified externally
             # or if the save process itself normalizes content that should be re-shown.
             # For now, mark_as_saved is the primary action.
@@ -564,9 +572,18 @@ class MainWindow(QMainWindow):
             self.editor_widget.current_topic_id = None # Reset current topic id
 
         if self.tree_widget and hasattr(self.tree_widget, 'remove_topic_item'):
+            logger.info(f"_on_dm_topic_deleted: Found remove_topic_item. Calling it for {deleted_topic_id}.")
             self.tree_widget.remove_topic_item(deleted_topic_id)
+            logger.info(f"_on_dm_topic_deleted: Returned from remove_topic_item for {deleted_topic_id}.")
         else:
-            logger.warning("Tree widget not available for UI update on topic_deleted.")
+            logger.error(f"_on_dm_topic_deleted: remove_topic_item method NOT FOUND in tree_widget. Tree will NOT be updated for deletion of {deleted_topic_id}. Falling back to full reload.")
+            # Fallback to full reload if specific removal isn't available
+            if self.tree_widget and self.data_manager:
+                logger.info(f"_on_dm_topic_deleted: Attempting fallback: self.tree_widget.load_tree_data for {deleted_topic_id}")
+                self.tree_widget.load_tree_data(self.data_manager)
+                logger.info(f"_on_dm_topic_deleted: Fallback load_tree_data completed for {deleted_topic_id}")
+            else:
+                logger.error("_on_dm_topic_deleted: Cannot fallback to load_tree_data, tree_widget or data_manager is None.")
         
         # If the deleted topic was a child of the currently open topic in the editor,
         # the parent topic's highlights might need refreshing (if it had extractions to the deleted child)
@@ -635,44 +652,59 @@ class MainWindow(QMainWindow):
 
 
     def closeEvent(self, event):
-        # Override QMainWindow's closeEvent to handle unsaved changes or other cleanup
-        if self.data_manager and self.editor_widget.is_dirty():
-            reply = QMessageBox.question(self, 'Unsaved Changes',
-                                         "The current topic has unsaved changes. Save before closing?",
-                                         QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel)
-            if reply == QMessageBox.StandardButton.Save:
-                self.save_current_topic_content(prompt_if_no_topic=False)
-                if self.editor_widget.is_dirty(): # Save failed or was cancelled
-                    event.ignore()
-                    return
-            elif reply == QMessageBox.StandardButton.Cancel:
-                event.ignore()
-                return
-            # If Discard, proceed to close
+        logger.info("Application close event triggered.")
         
-        # Store the path of the collection that was active when the app close sequence began.
+        # Step 1: Handle unsaved changes in the currently active editor
+        # This check needs to be robust: ensure editor_widget and current_topic_id exist.
+        if self.data_manager and \
+           self.editor_widget and \
+           self.editor_widget.current_topic_id and \
+           self.editor_widget.is_dirty():
+            
+            logger.info(f"Application close: Current editor for topic {self.editor_widget.current_topic_id} is dirty. Attempting to save.")
+            self.editor_widget.force_save_if_dirty(wait_for_completion=True) # Blocking save
+            
+            if self.editor_widget.is_dirty(): # Check if save failed
+                topic_title_for_msg = self.editor_widget.current_topic_id # Fallback title
+                # Try to get a more user-friendly title
+                if self.data_manager: # Check if data_manager is still valid
+                    details = self.data_manager.get_topic_details(self.editor_widget.current_topic_id)
+                    if details and details.get('title'):
+                        topic_title_for_msg = details['title']
+                
+                reply = QMessageBox.warning(
+                    self, "Unsaved Changes",
+                    f"Could not save changes for topic '{topic_title_for_msg}'.\n"
+                    "Do you want to close anyway and lose these changes?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No # Default to No
+                )
+                if reply == QMessageBox.StandardButton.No:
+                    event.ignore() # User chose not to close
+                    return
+        
+        # Step 2: Store the path of the collection that was active *before* _handle_close_collection
         collection_path_at_start_of_close = self.active_collection_path
 
-        # Perform standard operations for closing a collection, if one is managed.
-        # This includes saving unsaved changes, clearing UI elements.
-        # Importantly, _handle_close_collection calls _save_last_collection_path(None)
-        # as part of its routine for an explicit "close collection" action.
+        # Step 3: Perform standard operations for closing a collection, if one is managed.
+        # _handle_close_collection itself calls force_save_if_dirty for the current editor,
+        # but the above block is a more explicit primary check for the app closing sequence.
+        # _handle_close_collection will also set self.active_collection_path to None
+        # and call _save_last_collection_path(None).
         if self.data_manager:
             self._handle_close_collection()
 
-        # Now, determine the final "last_opened_collection" path to persist.
-        # If a collection was active when the application started to close,
+        # Step 4: Determine the final "last_opened_collection" path to persist.
+        # If a collection was active when the application started to close (before _handle_close_collection),
         # save its path. This overrides the None potentially set by _handle_close_collection.
         if collection_path_at_start_of_close:
             self._save_last_collection_path(collection_path_at_start_of_close)
         else:
-            # If no collection was active at the start of closeEvent (e.g., it was
-            # manually closed earlier, or no collection was ever opened),
-            # ensure the "last_opened_collection" setting is cleared.
-            # _handle_close_collection would have done this if self.data_manager was true.
-            # This explicit call handles cases where _handle_close_collection might not run
-            # (e.g., no data_manager) or simply reinforces the desired state.
+            # If no collection was active at the start of closeEvent, or if _handle_close_collection
+            # wasn't called (because no data_manager), ensure the setting is cleared.
             self._save_last_collection_path(None)
+            
+        # Step 5: Proceed with closing the application
         super().closeEvent(event)
 
 
